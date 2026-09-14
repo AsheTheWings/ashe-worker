@@ -4,7 +4,7 @@
 //! Speech is compacted locally, concatenated into one PCM timeline, and sent
 //! to speech-to-text only when the session finishes.
 
-use crate::fal_client::FalTranscript;
+use crate::stt::Transcript;
 use anyhow::{Result, anyhow};
 
 /// A safety ceiling for an abandoned session, not a normal duration limit.
@@ -354,7 +354,7 @@ impl FinalComposition {
         std::mem::take(&mut self.audio_pcm)
     }
 
-    pub fn assemble(&self, transcript: Option<&FalTranscript>) -> Result<String> {
+    pub fn assemble(&self, transcript: Option<&Transcript>) -> Result<String> {
         if self.speech_count == 0 {
             return Ok(self.assemble_entries(&[]));
         }
@@ -394,7 +394,7 @@ impl FinalComposition {
 
 fn map_speech_entries(
     entries: &[CompositionEntry],
-    transcript: &FalTranscript,
+    transcript: &Transcript,
 ) -> Result<Vec<String>> {
     let ranges: Vec<(f64, f64)> = entries
         .iter()
@@ -510,14 +510,14 @@ fn needs_boundary_space(left: char, right: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{CompositionSession, MAX_SESSION_PCM_BYTES, SilenceCompactor, TypingBuffer};
-    use crate::fal_client::{FalTranscript, TranscriptWord};
+    use crate::stt::{Transcript, TranscriptWord};
 
     fn pcm(sample: i16, samples: usize) -> Vec<u8> {
         sample.to_le_bytes().repeat(samples)
     }
 
-    fn transcript(words: Vec<TranscriptWord>) -> FalTranscript {
-        FalTranscript {
+    fn transcript(words: Vec<TranscriptWord>) -> Transcript {
+        Transcript {
             text: "speech one speech two".to_string(),
             words,
         }
@@ -720,7 +720,7 @@ mod tests {
         session.commit_insertion();
         session.push_speech(pcm(2_000, 100));
         let final_composition = session.finish();
-        let transcript = FalTranscript {
+        let transcript = Transcript {
             text: "speech one speech two".to_string(),
             words: vec![],
         };
@@ -735,7 +735,7 @@ mod tests {
         session.push_pasted_text("\n".to_string());
         session.commit_insertion();
         let final_composition = session.finish();
-        let transcript = FalTranscript {
+        let transcript = Transcript {
             text: "Hello".to_string(),
             words: vec![],
         };

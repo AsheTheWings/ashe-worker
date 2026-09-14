@@ -2,7 +2,7 @@ use crate::activity_pipeline::ActivityHandle;
 use crate::audio::AudioCapture;
 use crate::composition::{CompositionSession, MAX_SESSION_PCM_BYTES, SilenceCompactor};
 use crate::config::AppConfig;
-use crate::fal_client::transcribe_pcm;
+use crate::stt::transcribe_pcm;
 use crate::injector;
 use crate::llm_client;
 use crate::logger;

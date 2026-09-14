@@ -1,19 +1,35 @@
 //! Self-hosted speech-to-text through the Ashe API server.
 //!
-//! POSTs the captured WAV to `/v1/stt/transcribe` (faster-whisper behind
-//! the server) and reads back text with word timings, the same shape the
-//! composition mapping and spoken punctuation expect from the cloud path.
-//! The configured language is ISO-639-3 (the Scribe-era convention); the
-//! daemon speaks ISO-639-1, so common codes are mapped here and anything
-//! else fails loudly instead of transcribing in the wrong language.
+//! Dictation buffers microphone audio locally while recording and calls
+//! [`transcribe_pcm`] once on stop: the WAV is POSTed to
+//! `/v1/stt/transcribe` (faster-whisper behind the server) and read back
+//! as text with word timings. A single full-utterance request produces a
+//! more accurate result than committing streaming partials. The
+//! configured language is ISO-639-3; the daemon speaks ISO-639-1, so
+//! common codes are mapped here and anything else fails loudly instead
+//! of transcribing in the wrong language.
 
 use crate::config::AppConfig;
-use crate::fal_client::{FalTranscript, TranscriptWord};
 use crate::logger;
 use anyhow::{Context, Result, ensure};
 use std::time::{Duration, Instant};
 
-/// Per-request ceiling. Turbo runs ~1.5x real-time, so even minutes-long
+/// A transcript with word-level timing for the composition mapping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transcript {
+    pub text: String,
+    pub words: Vec<TranscriptWord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptWord {
+    pub text: String,
+    pub start: Option<f64>,
+    pub end: Option<f64>,
+    pub kind: String,
+}
+
+/// Per-request ceiling. Small runs ~5x real-time, so even minutes-long
 /// captures finish well inside this; it only bounds a wedged engine.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -63,8 +79,8 @@ pub fn map_language(configured: &str) -> Result<Option<String>> {
 }
 
 /// Read the daemon answer into a transcript. Malformed word entries are
-/// skipped like the cloud path skips malformed words; the text stands.
-pub fn parse_transcript(body: &serde_json::Value) -> Result<FalTranscript> {
+/// skipped; the text stands.
+pub fn parse_transcript(body: &serde_json::Value) -> Result<Transcript> {
     let text = body
         .get("text")
         .and_then(serde_json::Value::as_str)
@@ -87,12 +103,82 @@ pub fn parse_transcript(body: &serde_json::Value) -> Result<FalTranscript> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(FalTranscript { text, words })
+    Ok(Transcript { text, words })
+}
+
+/// Transcribe a complete recording with one engine request.
+pub async fn transcribe_pcm(
+    config: AppConfig,
+    sample_rate: u32,
+    pcm: Vec<u8>,
+) -> Result<Transcript> {
+    validate_capture(&pcm, sample_rate)?;
+    let seconds = pcm.len() as f64 / f64::from(sample_rate) / 2.0;
+    logger::info(format!(
+        "self-hosted transcription sample_rate={sample_rate} bytes={} seconds={seconds:.1}",
+        pcm.len(),
+    ));
+    let started = Instant::now();
+    let wav = encode_wav_mono16(&pcm, sample_rate);
+    drop(pcm);
+    let fetched = transcribe_wav(&config, wav).await?;
+    // Verbalized punctuation ("comma", "double quote") arrives as literal
+    // words: the transcription model has no dictation-command layer, so the
+    // conversion runs here, on the timed word stream the composition
+    // mapping aligns on.
+    let transcript = if config.spoken_punctuation {
+        crate::spoken_punctuation::apply_spoken_punctuation(&fetched)
+    } else {
+        fetched
+    };
+    logger::info(format!(
+        "transcription chars={} total_ms={}",
+        transcript.text.len(),
+        started.elapsed().as_millis()
+    ));
+    Ok(transcript)
+}
+
+fn validate_capture(pcm: &[u8], sample_rate: u32) -> Result<()> {
+    if pcm.is_empty() {
+        return Err(anyhow::anyhow!("no audio captured"));
+    }
+    if !pcm.len().is_multiple_of(2) {
+        return Err(anyhow::anyhow!("captured PCM has an odd byte count"));
+    }
+    if sample_rate == 0 {
+        return Err(anyhow::anyhow!(
+            "capture sample rate must be greater than zero"
+        ));
+    }
+    Ok(())
+}
+
+/// Wrap little-endian mono 16-bit PCM in a 44-byte WAV header so the
+/// model decodes the buffered capture without extra encoding parameters.
+pub fn encode_wav_mono16(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
+    let data_len = pcm.len() as u32;
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36u32.wrapping_add(data_len)).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate.wrapping_mul(2)).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
 }
 
 /// Transcribe a complete WAV with the self-hosted engine.
-pub async fn transcribe_wav(config: &AppConfig, wav: Vec<u8>) -> Result<FalTranscript> {
-    config.validate_for_self_hosted_stt()?;
+pub async fn transcribe_wav(config: &AppConfig, wav: Vec<u8>) -> Result<Transcript> {
+    config.validate_for_dictation()?;
     ensure!(!wav.is_empty(), "captured WAV is empty");
     let started = Instant::now();
     let client = reqwest::Client::builder()
@@ -100,7 +186,7 @@ pub async fn transcribe_wav(config: &AppConfig, wav: Vec<u8>) -> Result<FalTrans
         .build()
         .context("failed to create HTTP client")?;
     let mut endpoint = config.worker_endpoint("/v1/stt/transcribe")?;
-    if let Some(language) = map_language(&config.fal_language)? {
+    if let Some(language) = map_language(&config.stt_language)? {
         endpoint.push_str("?language=");
         endpoint.push_str(&language);
     }
@@ -135,8 +221,28 @@ pub async fn transcribe_wav(config: &AppConfig, wav: Vec<u8>) -> Result<FalTrans
 
 #[cfg(test)]
 mod tests {
-    use super::{map_language, parse_transcript};
+    use super::{encode_wav_mono16, map_language, parse_transcript};
     use serde_json::json;
+
+    #[test]
+    fn wav_header_describes_mono16_capture() {
+        let pcm = vec![0x01, 0x02, 0x03, 0x04];
+        let wav = encode_wav_mono16(&pcm, 48_000);
+        assert_eq!(wav.len(), 48);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1);
+        assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
+        assert_eq!(
+            u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
+            48_000
+        );
+        assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16);
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 4);
+        assert_eq!(&wav[44..], &pcm[..]);
+    }
 
     #[test]
     fn language_mapping_covers_configured_codes() {

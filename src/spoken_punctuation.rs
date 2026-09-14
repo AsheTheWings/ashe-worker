@@ -14,7 +14,7 @@
 //! uses. Say `literal` before a command to keep the words, e.g. `literal
 //! comma` inserts the word "comma".
 
-use crate::fal_client::{FalTranscript, TranscriptWord};
+use crate::stt::{Transcript, TranscriptWord};
 use crate::logger;
 
 /// Punctuation the transcription model may glue onto a command word from
@@ -58,7 +58,7 @@ enum Command {
 
 /// Convert spoken punctuation commands in `transcript`, dropping the
 /// command words. Returns the transcript unchanged when it holds none.
-pub fn apply_spoken_punctuation(transcript: &FalTranscript) -> FalTranscript {
+pub fn apply_spoken_punctuation(transcript: &Transcript) -> Transcript {
     let Some(converted) = convert(&transcript.words) else {
         return transcript.clone();
     };
@@ -66,7 +66,7 @@ pub fn apply_spoken_punctuation(transcript: &FalTranscript) -> FalTranscript {
         "Spoken punctuation converted commands={}",
         converted.commands,
     ));
-    FalTranscript {
+    Transcript {
         text: rebuild_text(&converted.words),
         words: converted.words,
     }
@@ -383,7 +383,7 @@ fn needs_boundary_space(left: char, right: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::apply_spoken_punctuation;
-    use crate::fal_client::{FalTranscript, TranscriptWord};
+    use crate::stt::{Transcript, TranscriptWord};
 
     fn word(text: &str) -> TranscriptWord {
         TranscriptWord {
@@ -416,14 +416,14 @@ mod tests {
         out
     }
 
-    fn transcript(text: &str, words: Vec<TranscriptWord>) -> FalTranscript {
-        FalTranscript {
+    fn transcript(text: &str, words: Vec<TranscriptWord>) -> Transcript {
+        Transcript {
             text: text.to_string(),
             words,
         }
     }
 
-    fn converted(groups: &[&str]) -> FalTranscript {
+    fn converted(groups: &[&str]) -> Transcript {
         let words = stream(groups);
         let text = words
             .iter()
