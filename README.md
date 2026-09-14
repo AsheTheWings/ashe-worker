@@ -61,11 +61,13 @@ content.
 
 Natural pauses remain intact. Once silence reaches five seconds, dead air is
 compacted locally and the bar shows `silence skipped` instead of the timer;
-compacted audio is never submitted as a separate request. When the session
-finishes, all retained speech is sent once to the self-hosted transcription
-engine behind the Ashe API server (Whisper, requires `ASHE_STT_TOKEN`), then
-interleaved with exact typed and
-pasted content using word timestamps. The result is inserted once into the
+compacted audio is never submitted as a separate request. Each sealed speech
+segment is sent to the self-hosted transcription engine behind the Ashe API
+server (Whisper, requires `ASHE_STT_TOKEN`) in the background: switching to
+typing and a listening line break seal the audio so far and transcribe it
+while dictation continues. Stopping only waits for the outstanding tail,
+then interleaves one transcript per speech segment with exact typed and
+pasted content in chronological order. The result is inserted once into the
 application where dictation started, with no LLM polishing. While
 transcription runs, the pill shows `processing...`. Dictation requires
 `ASHE_STT_TOKEN`.

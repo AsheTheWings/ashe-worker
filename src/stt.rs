@@ -1,13 +1,14 @@
 //! Self-hosted speech-to-text through the Ashe API server.
 //!
 //! Dictation buffers microphone audio locally while recording and calls
-//! [`transcribe_pcm`] once on stop: the WAV is POSTed to
-//! `/v1/stt/transcribe` (faster-whisper behind the server) and read back
-//! as text with word timings. A single full-utterance request produces a
-//! more accurate result than committing streaming partials. The
-//! configured language is ISO-639-3; the daemon speaks ISO-639-1, so
-//! common codes are mapped here and anything else fails loudly instead
-//! of transcribing in the wrong language.
+//! [`transcribe_pcm`] once per sealed speech segment: the WAV is POSTed
+//! to `/v1/stt/transcribe` (faster-whisper behind the server) and read
+//! back as text with word timings. Segments sealed while switching to
+//! typing or on a listening line break transcribe in the background, so
+//! stopping only waits for the outstanding tail. The configured language
+//! is ISO-639-3; the daemon speaks ISO-639-1, so common codes are mapped
+//! here and anything else fails loudly instead of transcribing in the
+//! wrong language.
 
 use crate::config::AppConfig;
 use crate::logger;
@@ -106,7 +107,7 @@ pub fn parse_transcript(body: &serde_json::Value) -> Result<Transcript> {
     Ok(Transcript { text, words })
 }
 
-/// Transcribe a complete recording with one engine request.
+/// Transcribe one sealed speech segment with one engine request.
 pub async fn transcribe_pcm(
     config: AppConfig,
     sample_rate: u32,

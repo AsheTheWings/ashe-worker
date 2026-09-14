@@ -1,8 +1,9 @@
 //! Ordered dictation composition and long-silence compaction.
 //!
 //! A session keeps speech and exact user insertions in chronological order.
-//! Speech is compacted locally, concatenated into one PCM timeline, and sent
-//! to speech-to-text only when the session finishes.
+//! Each sealed speech segment is transcribed in the background while
+//! dictation continues, so stopping only waits for the outstanding tail
+//! instead of the whole capture.
 
 use crate::stt::Transcript;
 use anyhow::{Result, anyhow};
@@ -14,7 +15,6 @@ pub const MAX_SESSION_PCM_BYTES: usize = 256 * 1024 * 1024;
 const BYTES_PER_SAMPLE: usize = 2;
 const LONG_SILENCE_SECONDS: usize = 5;
 const GAP_EDGE_MILLISECONDS: usize = 250;
-const SPEECH_SEPARATOR_MILLISECONDS: usize = 500;
 const PASTE_MARKER: &str = "[pasted]";
 const LINE_BREAK_MARKER: char = '↵';
 
@@ -137,7 +137,7 @@ impl SilenceCompactor {
 
 #[derive(Debug, Clone, PartialEq)]
 enum CompositionEntry {
-    Speech { start: f64, end: f64 },
+    Speech,
     Insertion(String),
 }
 
@@ -233,6 +233,7 @@ pub struct CompositionSession {
     typing: TypingBuffer,
     insertion_count: usize,
     speech_count: usize,
+    speech_transcripts: Vec<Option<Transcript>>,
 }
 
 impl CompositionSession {
@@ -245,25 +246,52 @@ impl CompositionSession {
             typing: TypingBuffer::default(),
             insertion_count: 0,
             speech_count: 0,
+            speech_transcripts: Vec::new(),
         }
     }
 
-    pub fn push_speech(&mut self, pcm: Vec<u8>) {
+    /// Record one sealed speech segment and reserve its transcript slot.
+    /// Returns the segment index the background transcription fills in.
+    /// Each segment is transcribed on its own, so no separator silence or
+    /// global timing map is needed.
+    pub fn push_speech(&mut self, pcm: Vec<u8>) -> Option<usize> {
         if pcm.is_empty() || self.sample_rate == 0 {
-            return;
+            return None;
         }
-        if self.speech_count > 0 {
-            let separator_bytes = self.sample_rate as usize * SPEECH_SEPARATOR_MILLISECONDS / 1_000
-                * BYTES_PER_SAMPLE;
-            self.audio_pcm
-                .resize(self.audio_pcm.len().saturating_add(separator_bytes), 0);
-        }
-        let bytes_per_second = self.sample_rate as f64 * BYTES_PER_SAMPLE as f64;
-        let start = self.audio_pcm.len() as f64 / bytes_per_second;
         self.audio_pcm.extend_from_slice(&pcm);
-        let end = self.audio_pcm.len() as f64 / bytes_per_second;
-        self.entries.push(CompositionEntry::Speech { start, end });
+        self.entries.push(CompositionEntry::Speech);
         self.speech_count += 1;
+        self.speech_transcripts.push(None);
+        Some(self.speech_count - 1)
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn speech_count(&self) -> usize {
+        self.speech_count
+    }
+
+    /// Store the background transcript for one sealed segment.
+    /// Returns false when the index does not belong to this session.
+    pub fn set_speech_transcript(&mut self, index: usize, transcript: Transcript) -> bool {
+        if let Some(slot) = self.speech_transcripts.get_mut(index) {
+            *slot = Some(transcript);
+            return true;
+        }
+        false
+    }
+
+    pub fn pending_transcript_count(&self) -> usize {
+        self.speech_transcripts
+            .iter()
+            .filter(|slot| slot.is_none())
+            .count()
+    }
+
+    pub fn all_transcripts_ready(&self) -> bool {
+        self.speech_transcripts.iter().all(|slot| slot.is_some())
     }
 
     pub fn push_typed_text(&mut self, text: &str) {
@@ -317,20 +345,18 @@ impl CompositionSession {
     pub fn finish(self) -> FinalComposition {
         FinalComposition {
             target_hwnd: self.target_hwnd,
-            sample_rate: self.sample_rate,
-            audio_pcm: self.audio_pcm,
             entries: self.entries,
             speech_count: self.speech_count,
+            segment_transcripts: self.speech_transcripts,
         }
     }
 }
 
 pub struct FinalComposition {
     target_hwnd: isize,
-    sample_rate: u32,
-    audio_pcm: Vec<u8>,
     entries: Vec<CompositionEntry>,
     speech_count: usize,
+    segment_transcripts: Vec<Option<Transcript>>,
 }
 
 impl FinalComposition {
@@ -338,39 +364,27 @@ impl FinalComposition {
         self.target_hwnd
     }
 
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    pub fn speech_count(&self) -> usize {
+        self.speech_count
     }
 
-    pub fn audio_pcm_len(&self) -> usize {
-        self.audio_pcm.len()
-    }
-
-    pub fn has_speech(&self) -> bool {
-        self.speech_count > 0
-    }
-
-    pub fn take_audio(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.audio_pcm)
-    }
-
-    pub fn assemble(&self, transcript: Option<&Transcript>) -> Result<String> {
+    /// Interleave one transcript per speech segment with the exact typed
+    /// insertions in chronological order. Every segment transcribed in
+    /// the background fills its slot; assembly only waits for the tail.
+    pub fn assemble(&self) -> Result<String> {
         if self.speech_count == 0 {
             return Ok(self.assemble_entries(&[]));
         }
-        let transcript = transcript.ok_or_else(|| anyhow!("speech transcript is missing"))?;
-        if self.speech_count == 1 {
-            return Ok(self.assemble_entries(&[transcript.text.trim().to_string()]));
+        if self.segment_transcripts.len() != self.speech_count {
+            return Err(anyhow!("speech transcripts do not match speech segments"));
         }
-        if !self
-            .entries
-            .iter()
-            .any(|entry| matches!(entry, CompositionEntry::Insertion(_)))
-        {
-            return Ok(transcript.text.trim().to_string());
+        let mut speech = Vec::with_capacity(self.speech_count);
+        for slot in &self.segment_transcripts {
+            let transcript = slot
+                .as_ref()
+                .ok_or_else(|| anyhow!("speech transcript is missing"))?;
+            speech.push(transcript.text.trim().to_string());
         }
-
-        let speech = map_speech_entries(&self.entries, transcript)?;
         Ok(self.assemble_entries(&speech))
     }
 
@@ -379,7 +393,7 @@ impl FinalComposition {
         let mut speech_index = 0;
         for entry in &self.entries {
             match entry {
-                CompositionEntry::Speech { .. } => {
+                CompositionEntry::Speech => {
                     if let Some(text) = speech.get(speech_index) {
                         append_piece(&mut result, text.trim());
                     }
@@ -389,96 +403,6 @@ impl FinalComposition {
             }
         }
         result
-    }
-}
-
-fn map_speech_entries(
-    entries: &[CompositionEntry],
-    transcript: &Transcript,
-) -> Result<Vec<String>> {
-    let ranges: Vec<(f64, f64)> = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            CompositionEntry::Speech { start, end } => Some((*start, *end)),
-            CompositionEntry::Insertion(_) => None,
-        })
-        .collect();
-    let mut mapped = vec![String::new(); ranges.len()];
-    let mut assignments = vec![None; transcript.words.len()];
-    let mut timed_words = 0;
-
-    for (index, word) in transcript.words.iter().enumerate() {
-        if word.kind == "audio_event" {
-            continue;
-        }
-        if let (Some(start), Some(end)) = (word.start, word.end) {
-            let midpoint = (start + end) / 2.0;
-            assignments[index] = nearest_range(midpoint, &ranges);
-            if word.kind != "spacing" {
-                timed_words += 1;
-            }
-        }
-    }
-    if timed_words == 0 {
-        return Err(anyhow!(
-            "transcript lacks timed words for ordered speech composition"
-        ));
-    }
-
-    for index in 0..assignments.len() {
-        if assignments[index].is_some() || transcript.words[index].kind != "spacing" {
-            continue;
-        }
-        assignments[index] = assignments[..index]
-            .iter()
-            .rev()
-            .copied()
-            .flatten()
-            .next()
-            .or_else(|| assignments[index + 1..].iter().copied().flatten().next());
-    }
-
-    for (word, assignment) in transcript.words.iter().zip(assignments) {
-        if word.kind == "audio_event" {
-            continue;
-        }
-        let Some(range_index) = assignment else {
-            if word.kind == "spacing" || word.text.is_empty() {
-                continue;
-            }
-            return Err(anyhow!(
-                "transcript contains an untimed word in ordered composition"
-            ));
-        };
-        if word.kind == "spacing" {
-            mapped[range_index].push_str(&word.text);
-        } else {
-            append_piece(&mut mapped[range_index], &word.text);
-        }
-    }
-    for text in &mut mapped {
-        *text = text.trim().to_string();
-    }
-    Ok(mapped)
-}
-
-fn nearest_range(timestamp: f64, ranges: &[(f64, f64)]) -> Option<usize> {
-    ranges
-        .iter()
-        .enumerate()
-        .min_by(|(_, left), (_, right)| {
-            distance_to_range(timestamp, **left).total_cmp(&distance_to_range(timestamp, **right))
-        })
-        .map(|(index, _)| index)
-}
-
-fn distance_to_range(timestamp: f64, range: (f64, f64)) -> f64 {
-    if timestamp < range.0 {
-        range.0 - timestamp
-    } else if timestamp > range.1 {
-        timestamp - range.1
-    } else {
-        0.0
     }
 }
 
@@ -510,34 +434,16 @@ fn needs_boundary_space(left: char, right: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{CompositionSession, MAX_SESSION_PCM_BYTES, SilenceCompactor, TypingBuffer};
-    use crate::stt::{Transcript, TranscriptWord};
+    use crate::stt::Transcript;
 
     fn pcm(sample: i16, samples: usize) -> Vec<u8> {
         sample.to_le_bytes().repeat(samples)
     }
 
-    fn transcript(words: Vec<TranscriptWord>) -> Transcript {
+    fn text_transcript(text: &str) -> Transcript {
         Transcript {
-            text: "speech one speech two".to_string(),
-            words,
-        }
-    }
-
-    fn word(text: &str, start: f64, end: f64) -> TranscriptWord {
-        TranscriptWord {
             text: text.to_string(),
-            start: Some(start),
-            end: Some(end),
-            kind: "word".to_string(),
-        }
-    }
-
-    fn spacing(text: &str) -> TranscriptWord {
-        TranscriptWord {
-            text: text.to_string(),
-            start: None,
-            end: None,
-            kind: "spacing".to_string(),
+            words: Vec::new(),
         }
     }
 
@@ -603,8 +509,8 @@ mod tests {
         session.push_pasted_text("\nPASTED".to_string());
         assert!(session.commit_insertion());
         let final_composition = session.finish();
-        assert!(!final_composition.has_speech());
-        assert_eq!(final_composition.assemble(None).unwrap(), "typed\nPASTED");
+        assert_eq!(final_composition.speech_count(), 0);
+        assert_eq!(final_composition.assemble().unwrap(), "typed\nPASTED");
     }
 
     #[test]
@@ -647,7 +553,7 @@ mod tests {
         assert!(session.commit_insertion());
         session.commit_line_break();
         assert_eq!(session.insertion_count(), 2);
-        assert_eq!(session.finish().assemble(None).unwrap(), "alpha\nbeta\n");
+        assert_eq!(session.finish().assemble().unwrap(), "alpha\nbeta\n");
     }
 
     #[test]
@@ -660,22 +566,15 @@ mod tests {
     #[test]
     fn speech_and_insertions_are_assembled_in_order() {
         let mut session = CompositionSession::new(42, 100);
-        session.push_speech(pcm(2_000, 100));
+        let first = session.push_speech(pcm(2_000, 100)).unwrap();
         session.push_typed_text("typed");
         assert!(session.commit_insertion());
-        session.push_speech(pcm(2_000, 100));
+        let second = session.push_speech(pcm(2_000, 100)).unwrap();
+        assert!(session.set_speech_transcript(first, text_transcript("speech one")));
+        assert!(session.set_speech_transcript(second, text_transcript("speech two")));
         let final_composition = session.finish();
-        let transcript = transcript(vec![
-            word("speech", 0.0, 0.4),
-            spacing(" "),
-            word("one", 0.5, 0.9),
-            spacing(" "),
-            word("speech", 1.6, 2.0),
-            spacing(" "),
-            word("two", 2.1, 2.4),
-        ]);
         assert_eq!(
-            final_composition.assemble(Some(&transcript)).unwrap(),
+            final_composition.assemble().unwrap(),
             "speech one typed speech two"
         );
     }
@@ -689,7 +588,7 @@ mod tests {
         assert!(session.commit_insertion());
         let final_composition = session.finish();
         assert_eq!(
-            final_composition.assemble(None).unwrap(),
+            final_composition.assemble().unwrap(),
             "before:\nEXACT\r\nafter"
         );
     }
@@ -699,7 +598,7 @@ mod tests {
         let mut session = CompositionSession::new(0, 100);
         session.push_pasted_text("\n  exact  \r\n".to_string());
         assert!(session.commit_insertion());
-        assert_eq!(session.finish().assemble(None).unwrap(), "\n  exact  \r\n");
+        assert_eq!(session.finish().assemble().unwrap(), "\n  exact  \r\n");
     }
 
     #[test]
@@ -713,36 +612,45 @@ mod tests {
     }
 
     #[test]
-    fn missing_timestamps_do_not_guess_across_insertions() {
+    fn missing_segment_transcript_fails_assembly() {
         let mut session = CompositionSession::new(0, 100);
-        session.push_speech(pcm(2_000, 100));
+        let first = session.push_speech(pcm(2_000, 100)).unwrap();
         session.push_typed_text("typed");
         session.commit_insertion();
         session.push_speech(pcm(2_000, 100));
+        assert!(session.set_speech_transcript(first, text_transcript("speech one")));
         let final_composition = session.finish();
-        let transcript = Transcript {
-            text: "speech one speech two".to_string(),
-            words: vec![],
-        };
-        assert!(final_composition.assemble(Some(&transcript)).is_err());
+        assert!(final_composition.assemble().is_err());
     }
 
     #[test]
     fn deterministic_joining_respects_punctuation_and_explicit_whitespace() {
         let mut session = CompositionSession::new(0, 100);
-        session.push_speech(pcm(2_000, 100));
+        let index = session.push_speech(pcm(2_000, 100)).unwrap();
         session.push_typed_text(", exactly");
         session.push_pasted_text("\n".to_string());
         session.commit_insertion();
+        assert!(session.set_speech_transcript(index, text_transcript("Hello")));
         let final_composition = session.finish();
-        let transcript = Transcript {
-            text: "Hello".to_string(),
-            words: vec![],
-        };
-        assert_eq!(
-            final_composition.assemble(Some(&transcript)).unwrap(),
-            "Hello, exactly\n"
-        );
+        assert_eq!(final_composition.assemble().unwrap(), "Hello, exactly\n");
+    }
+
+    #[test]
+    fn sealed_segments_get_sequential_transcript_slots() {
+        let mut session = CompositionSession::new(0, 100);
+        assert_eq!(session.pending_transcript_count(), 0);
+        let first = session.push_speech(pcm(2_000, 10)).unwrap();
+        let second = session.push_speech(pcm(2_000, 10)).unwrap();
+        assert_eq!((first, second), (0, 1));
+        assert_eq!(session.speech_count(), 2);
+        assert_eq!(session.pending_transcript_count(), 2);
+        assert!(!session.all_transcripts_ready());
+        assert!(!session.set_speech_transcript(7, text_transcript("stale")));
+        assert!(session.set_speech_transcript(first, text_transcript("one")));
+        assert_eq!(session.pending_transcript_count(), 1);
+        assert!(session.set_speech_transcript(second, text_transcript("  two  ")));
+        assert!(session.all_transcripts_ready());
+        assert_eq!(session.finish().assemble().unwrap(), "one two");
     }
 
     #[test]

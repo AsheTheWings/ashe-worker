@@ -2,7 +2,6 @@ use crate::activity_pipeline::ActivityHandle;
 use crate::audio::AudioCapture;
 use crate::composition::{CompositionSession, MAX_SESSION_PCM_BYTES, SilenceCompactor};
 use crate::config::AppConfig;
-use crate::stt::transcribe_pcm;
 use crate::injector;
 use crate::llm_client;
 use crate::logger;
@@ -10,6 +9,7 @@ use crate::overlay_view;
 use crate::paste_upload::PasteUploader;
 use crate::pill_renderer;
 use crate::spectrum::{SpectrumAnalyzer, pcm_chunk_to_mono};
+use crate::stt::{Transcript, transcribe_pcm};
 use crate::win32_service::{self, Win32Command, Win32Event};
 use crossbeam_channel::{Receiver, Sender};
 use iced::{Element, Point, Subscription, Task, window};
@@ -62,6 +62,7 @@ pub struct UiApp {
     session: Option<CompositionSession>,
     dictation_bar_active: bool,
     dictation_insertion_count: usize,
+    dictation_seq: u64,
     recording_elapsed: Duration,
     recording_started_at: Option<Instant>,
     line_break_feedback_until: Option<Instant>,
@@ -85,9 +86,10 @@ pub enum Message {
     Tick,
     WindowReady(Option<window::Id>),
     WindowCloseRequested(window::Id),
-    TranscriptionCompleted {
-        target_hwnd: isize,
-        result: Result<String, String>,
+    SegmentTranscribed {
+        seq: u64,
+        index: usize,
+        result: Result<Transcript, String>,
     },
     TextActionCompleted(PolishResult),
     PasteImageUploaded {
@@ -118,6 +120,7 @@ impl UiApp {
             session: None,
             dictation_bar_active: false,
             dictation_insertion_count: 0,
+            dictation_seq: 0,
             recording_elapsed: Duration::ZERO,
             recording_started_at: None,
             line_break_feedback_until: None,
@@ -162,10 +165,9 @@ impl UiApp {
                 Task::none()
             }
             Message::Tick => self.pump(),
-            Message::TranscriptionCompleted {
-                target_hwnd,
-                result,
-            } => self.finish_transcription(target_hwnd, result),
+            Message::SegmentTranscribed { seq, index, result } => {
+                self.finish_segment_transcription(seq, index, result)
+            }
             Message::TextActionCompleted(result) => self.finish_text_action(result),
             Message::PasteImageUploaded {
                 target_hwnd,
@@ -231,7 +233,8 @@ impl UiApp {
     }
 
     /// Drain captured PCM into the recording buffer while feeding the live
-    /// voice spectrum. Transcription happens once on stop, not streaming.
+    /// voice spectrum. Sealed segments transcribe in the background while
+    /// dictation continues; stopping only waits for the outstanding tail.
     fn pump_audio_capture(&mut self) -> bool {
         if !matches!(
             self.state,
@@ -406,6 +409,8 @@ impl UiApp {
         self.current_audio.take();
         self.spectrum.reset();
         self.session = None;
+        // Drop late background transcripts from the cancelled session.
+        self.dictation_seq = self.dictation_seq.wrapping_add(1);
         // The in-flight text-action request (if any) is discarded by the
         // state guard when it completes; drop it here so no stale action
         // survives the cancel.
@@ -444,6 +449,7 @@ impl UiApp {
         self.error = None;
         self.dictation_bar_active = true;
         self.dictation_insertion_count = 0;
+        self.dictation_seq = self.dictation_seq.wrapping_add(1);
         self.recording_elapsed = Duration::ZERO;
         self.recording_started_at = None;
         self.line_break_feedback_until = None;
@@ -492,14 +498,15 @@ impl UiApp {
         ) {
             return Task::none();
         }
-        self.seal_current_audio();
+        // The sealed speech keeps transcribing while the user types.
+        let transcribe = self.seal_current_audio();
         self.line_break_feedback_until = None;
         self.state = DictationState::Typing;
         self.status = "Typing...".to_string();
         self.send_win32(Win32Command::SetTooltip(
             "Ashe Worker - Typing - Enter to resume - Win+Shift+H".to_string(),
         ));
-        Task::none()
+        transcribe
     }
 
     fn capture_typed_text(&mut self, text: String) -> Task<Message> {
@@ -595,7 +602,7 @@ impl UiApp {
             return Task::none();
         }
 
-        self.split_current_audio_segment();
+        let transcribe = self.split_current_audio_segment();
         let Some(session) = self.session.as_mut() else {
             return Task::none();
         };
@@ -604,28 +611,31 @@ impl UiApp {
         self.dictation_insertion_count = count;
         self.line_break_feedback_until = Some(Instant::now() + LINE_BREAK_FEEDBACK_DURATION);
         logger::info(format!("Dictation line break committed count={count}"));
-        Task::none()
+        // The pre-break speech keeps transcribing while recording continues.
+        transcribe
     }
 
-    fn split_current_audio_segment(&mut self) {
+    fn split_current_audio_segment(&mut self) -> Task<Message> {
         self.drain_pending_audio();
         let sample_rate = self
             .audio
             .as_ref()
             .map_or(self.config.output_sample_rate, AudioCapture::sample_rate);
-        self.commit_current_audio_segment();
+        let transcribe = self.commit_current_audio_segment();
         self.current_audio = Some(SilenceCompactor::new(sample_rate));
+        transcribe
     }
 
-    fn seal_current_audio(&mut self) {
+    fn seal_current_audio(&mut self) -> Task<Message> {
         self.stop_recording_timer();
         if let Some(mut audio) = self.audio.take() {
             audio.stop();
         }
         self.drain_pending_audio();
         self.audio_rx.take();
-        self.commit_current_audio_segment();
+        let transcribe = self.commit_current_audio_segment();
         self.spectrum.reset();
+        transcribe
     }
 
     fn drain_pending_audio(&mut self) {
@@ -640,15 +650,36 @@ impl UiApp {
         }
     }
 
-    fn commit_current_audio_segment(&mut self) {
-        if let Some(compactor) = self.current_audio.take()
-            && let Some(pcm) = compactor.finish()
-        {
-            logger::info(format!("Sealed local speech segment bytes={}", pcm.len()));
-            if let Some(session) = self.session.as_mut() {
-                session.push_speech(pcm);
-            }
-        }
+    /// Seal the current compactor into the session and transcribe the
+    /// segment in the background. Callers keep dictating while it runs.
+    fn commit_current_audio_segment(&mut self) -> Task<Message> {
+        let Some(compactor) = self.current_audio.take() else {
+            return Task::none();
+        };
+        let Some(pcm) = compactor.finish() else {
+            return Task::none();
+        };
+        let Some(session) = self.session.as_mut() else {
+            return Task::none();
+        };
+        let sample_rate = session.sample_rate();
+        let Some(index) = session.push_speech(pcm.clone()) else {
+            return Task::none();
+        };
+        logger::info(format!(
+            "Sealed local speech segment index={index} bytes={}",
+            pcm.len()
+        ));
+        let seq = self.dictation_seq;
+        let config = self.config.clone();
+        Task::perform(
+            async move {
+                transcribe_pcm(config, sample_rate, pcm)
+                    .await
+                    .map_err(|err| format!("{err:#}"))
+            },
+            move |result| Message::SegmentTranscribed { seq, index, result },
+        )
     }
 
     fn request_stop(&mut self) -> Task<Message> {
@@ -662,26 +693,29 @@ impl UiApp {
         ) {
             return Task::none();
         }
-        self.seal_current_audio();
+        let transcribe_tail = self.seal_current_audio();
         if self.state == DictationState::Typing
             && let Some(session) = self.session.as_mut()
         {
             session.commit_insertion();
         }
         self.send_win32(Win32Command::SetKeyboardCapture(false));
-        let Some(session) = self.session.take() else {
+        let Some(session) = self.session.as_ref() else {
             return self.finish_without_transcript();
         };
         self.dictation_insertion_count = session.insertion_count();
-        let mut composition = session.finish();
-        let target_hwnd = composition.target_hwnd();
+        let audio_bytes = session.audio_bytes();
+        let has_speech = session.speech_count() > 0;
         logger::info(format!(
-            "Stop dictation requested audio_bytes={} has_speech={}",
-            composition.audio_pcm_len(),
-            composition.has_speech()
+            "Stop dictation requested audio_bytes={audio_bytes} has_speech={has_speech}"
         ));
-        if !composition.has_speech() {
-            return match composition.assemble(None) {
+        if !has_speech {
+            let Some(session) = self.session.take() else {
+                return self.finish_without_transcript();
+            };
+            let composition = session.finish();
+            let target_hwnd = composition.target_hwnd();
+            return match composition.assemble() {
                 Ok(text) => self.begin_dictation_insert(target_hwnd, text),
                 Err(error) => {
                     logger::info(format!("Dictation composition failed: {error:#}"));
@@ -695,34 +729,75 @@ impl UiApp {
         self.send_win32(Win32Command::SetTooltip(
             "Ashe Worker - Transcribing... - Win+Shift+H".to_string(),
         ));
-        let pcm = composition.take_audio();
-        let sample_rate = composition.sample_rate();
-        let config = self.config.clone();
-        Task::perform(
-            async move {
-                let transcript = transcribe_pcm(config, sample_rate, pcm)
-                    .await
-                    .map_err(|err| format!("{err:#}"))?;
-                composition
-                    .assemble(Some(&transcript))
-                    .map_err(|err| format!("{err:#}"))
-            },
-            move |result| Message::TranscriptionCompleted {
-                target_hwnd,
-                result,
-            },
-        )
+        // Earlier segments sealed on typing switches and line breaks are
+        // already transcribing or done; the tail joins them. Assembly runs
+        // once every slot completes.
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.all_transcripts_ready())
+        {
+            return self.assemble_ready_segments();
+        }
+        transcribe_tail
     }
 
-    fn finish_transcription(
+    /// Store one background segment transcript. While still dictating the
+    /// text simply waits; after stop the last completion assembles.
+    fn finish_segment_transcription(
         &mut self,
-        target_hwnd: isize,
-        result: Result<String, String>,
+        seq: u64,
+        index: usize,
+        result: Result<Transcript, String>,
     ) -> Task<Message> {
+        if seq != self.dictation_seq {
+            return Task::none();
+        }
+        let remaining = match self.session.as_mut() {
+            Some(session) => match result {
+                Ok(transcript) => {
+                    if !session.set_speech_transcript(index, transcript) {
+                        logger::info(format!(
+                            "Discarded transcript for unknown segment index={index}"
+                        ));
+                        return Task::none();
+                    }
+                    logger::info(format!("Segment transcribed index={index}"));
+                    session.pending_transcript_count()
+                }
+                Err(err) => {
+                    logger::info(format!("Segment transcription failed index={index}: {err}"));
+                    // Invalidate the other in-flight segments before
+                    // tearing down so their late arrivals are dropped.
+                    self.dictation_seq = self.dictation_seq.wrapping_add(1);
+                    self.error = Some("Transcription failed".to_string());
+                    self.status = "Transcription failed".to_string();
+                    self.send_win32(Win32Command::SetTooltip(
+                        "Ashe Worker - Transcription error - Win+Shift+H".to_string(),
+                    ));
+                    return self.hide_overlay_after_session();
+                }
+            },
+            None => return Task::none(),
+        };
         if self.state != DictationState::Transcribing {
             return Task::none();
         }
-        match result {
+        if remaining > 0 {
+            return Task::none();
+        }
+        self.assemble_ready_segments()
+    }
+
+    /// Assemble the finished session once every segment slot holds text.
+    fn assemble_ready_segments(&mut self) -> Task<Message> {
+        let Some(session) = self.session.take() else {
+            return self.finish_without_transcript();
+        };
+        self.dictation_insertion_count = session.insertion_count();
+        let composition = session.finish();
+        let target_hwnd = composition.target_hwnd();
+        match composition.assemble() {
             Ok(text) => {
                 if text.is_empty() {
                     logger::info("Transcription returned no speech");
@@ -733,14 +808,9 @@ impl UiApp {
                 self.error = None;
                 self.begin_dictation_insert(target_hwnd, text)
             }
-            Err(err) => {
-                logger::info(format!("Transcription failed: {err}"));
-                self.error = Some("Transcription failed".to_string());
-                self.status = "Transcription failed".to_string();
-                self.send_win32(Win32Command::SetTooltip(
-                    "Ashe Worker - Transcription error - Win+Shift+H".to_string(),
-                ));
-                self.hide_overlay_after_session()
+            Err(error) => {
+                logger::info(format!("Dictation composition failed: {error}"));
+                self.finish_without_transcript()
             }
         }
     }
@@ -1024,6 +1094,7 @@ impl UiApp {
     fn hide_overlay_after_session(&mut self) -> Task<Message> {
         self.session = None;
         self.current_audio = None;
+        self.dictation_seq = self.dictation_seq.wrapping_add(1);
         self.clear_dictation_bar();
         self.text_action = None;
         self.state = DictationState::Idle;
