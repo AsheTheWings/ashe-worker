@@ -421,7 +421,7 @@ fn map_speech_entries(
     }
     if timed_words == 0 {
         return Err(anyhow!(
-            "fal response lacks timed words for ordered speech composition"
+            "transcript lacks timed words for ordered speech composition"
         ));
     }
 
@@ -447,7 +447,7 @@ fn map_speech_entries(
                 continue;
             }
             return Err(anyhow!(
-                "fal response contains an untimed word in ordered composition"
+                "transcript contains an untimed word in ordered composition"
             ));
         };
         if word.kind == "spacing" {
