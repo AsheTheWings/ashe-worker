@@ -159,6 +159,39 @@ impl TextRasterizer {
         }
     }
 
+    /// Draw the single centered status word for the mini text-action pill
+    /// (grammar, question). The rect is the whole mini pill; nothing else
+    /// is composited onto a mini frame.
+    pub(crate) fn draw_mini_text(
+        &mut self,
+        rgba: &mut [u8],
+        width: u32,
+        height: u32,
+        scale: f32,
+        text: Option<&str>,
+    ) {
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            let rect = PixelRect::from_logical(
+                0.0,
+                0.0,
+                pill_renderer::MINI_WIDTH,
+                pill_renderer::MINI_HEIGHT,
+                scale,
+            );
+            self.draw_text(
+                rgba,
+                width,
+                height,
+                text,
+                MAIN_FONT_PIXELS * scale,
+                rect,
+                TextAlign::Center,
+                TextColor::rgb(255, 255, 255),
+                u8::MAX,
+            );
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &mut self,

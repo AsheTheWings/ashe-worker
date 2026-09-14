@@ -43,6 +43,9 @@ pub struct OverlayFrame<'a> {
     pub state: PillState,
     pub main_text: Option<&'a str>,
     pub top_bar: Option<&'a TopBarContent>,
+    /// Compact text-action pill (grammar, question): a small window with
+    /// one centered status word instead of the full dictate pill.
+    pub mini: bool,
 }
 
 impl NativeOverlay {
@@ -104,32 +107,53 @@ impl NativeOverlay {
             y: frame.y.round() as i32,
         };
         let monitor_scale = monitor_scale_factor(anchor);
-        let width = (pill_renderer::WIDTH * monitor_scale).round().max(1.0) as u32;
-        let scale = width as f32 / pill_renderer::WIDTH;
-        let main_top = (pill_renderer::MAIN_TOP * scale).round().max(0.0) as u32;
-        let main_height = (pill_renderer::PILL_HEIGHT * scale).round().max(1.0) as u32;
-        let height = main_top.saturating_add(main_height);
-        let destination = POINT {
-            x: anchor.x,
-            y: anchor.y - main_top as i32,
+        // The mini pill is its own window size: just the compact capsule
+        // with its bottom edge at the anchor, like the dictate pill.
+        let logical_width = if frame.mini {
+            pill_renderer::MINI_WIDTH
+        } else {
+            pill_renderer::WIDTH
         };
-        let mut rgba = pill_renderer::render_rgba(
-            width,
-            height,
-            frame.bars,
-            frame.state,
-            frame.main_text.is_none(),
-            frame.top_bar.is_some(),
-        )
-        .ok_or_else(|| anyhow!("failed to allocate layered overlay frame"))?;
-        self.text.draw(
-            &mut rgba,
-            width,
-            height,
-            scale,
-            frame.main_text,
-            frame.top_bar,
-        );
+        let width = (logical_width * monitor_scale).round().max(1.0) as u32;
+        let scale = width as f32 / logical_width;
+        let (height, destination, rgba) = if frame.mini {
+            let height = (pill_renderer::MINI_HEIGHT * scale).round().max(1.0) as u32;
+            let destination = POINT {
+                x: anchor.x,
+                y: anchor.y - height as i32,
+            };
+            let mut rgba = pill_renderer::render_mini_rgba(width, height, frame.state)
+                .ok_or_else(|| anyhow!("failed to allocate mini overlay frame"))?;
+            self.text
+                .draw_mini_text(&mut rgba, width, height, scale, frame.main_text);
+            (height, destination, rgba)
+        } else {
+            let main_top = (pill_renderer::MAIN_TOP * scale).round().max(0.0) as u32;
+            let main_height = (pill_renderer::PILL_HEIGHT * scale).round().max(1.0) as u32;
+            let height = main_top.saturating_add(main_height);
+            let destination = POINT {
+                x: anchor.x,
+                y: anchor.y - main_top as i32,
+            };
+            let mut rgba = pill_renderer::render_rgba(
+                width,
+                height,
+                frame.bars,
+                frame.state,
+                frame.main_text.is_none(),
+                frame.top_bar.is_some(),
+            )
+            .ok_or_else(|| anyhow!("failed to allocate layered overlay frame"))?;
+            self.text.draw(
+                &mut rgba,
+                width,
+                height,
+                scale,
+                frame.main_text,
+                frame.top_bar,
+            );
+            (height, destination, rgba)
+        };
 
         if self
             .surface
@@ -175,10 +199,12 @@ impl NativeOverlay {
             if ShowWindow(self.hwnd, SW_SHOWNOACTIVATE).as_bool() || !actually_visible {
                 logger::info(format!(
                     "Native layered overlay shown size={}x{} scale={scale:.2} \
-                     tracked_visible={} actual_visible={actually_visible} at=({},{})",
+                     tracked_visible={} actual_visible={actually_visible} \
+                     mini={} at=({},{})",
                     width,
                     height,
                     self.visible,
+                    frame.mini,
                     destination.x,
                     destination.y,
                 ));

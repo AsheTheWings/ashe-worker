@@ -12,6 +12,10 @@ pub const TOP_BAR_TEXT_INSET: f32 = 12.0;
 pub const TOP_BAR_COUNT_WIDTH: f32 = 96.0;
 pub const TOP_BAR_CONTENT_GAP: f32 = 2.0;
 pub const TOP_BAR_ACCESSORY_WIDTH: f32 = 20.0;
+/// Compact pill for short-lived text actions (grammar, question). Just
+/// large enough for one centered status word, no visualizer or top bar.
+pub const MINI_WIDTH: f32 = 208.0;
+pub const MINI_HEIGHT: f32 = 56.0;
 const BORDER_WIDTH: f32 = 2.0;
 const TOP_BAR_CORNER_RADIUS: f32 = 10.0;
 const TOP_BAR_SHOULDER_RADIUS: f32 = 10.0;
@@ -30,6 +34,9 @@ const ERROR_BORDER: [u8; 4] = [217, 69, 61, 255];
 const _: () = assert!(HEIGHT <= 104.0, "dictate overlay stays compact");
 const _: () = assert!(WIDTH <= 480.0, "dictate overlay stays compact");
 const _: () = assert!(PILL_HEIGHT < WIDTH, "pill stays wider than tall");
+const _: () = assert!(MINI_WIDTH < WIDTH, "mini pill stays smaller than dictate pill");
+const _: () = assert!(MINI_HEIGHT < PILL_HEIGHT + MAIN_TOP, "mini pill stays compact");
+const _: () = assert!(MINI_HEIGHT < MINI_WIDTH, "mini pill stays wider than tall");
 
 /// Visual lifecycle of the dictate pill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +151,32 @@ pub fn render_rgba(
     Some(pixmap.take())
 }
 
+/// Render the compact text-action pill as premultiplied RGBA pixels. The
+/// pixmap holds exactly the pill: one capsule border over the background,
+/// with no visualizer bars or top bar. Status text is composited later by
+/// the overlay text rasterizer.
+pub fn render_mini_rgba(
+    pixel_width: u32,
+    pixel_height: u32,
+    state: PillState,
+) -> Option<Vec<u8>> {
+    let mut pixmap = Pixmap::new(pixel_width, pixel_height)?;
+    let scale = pixel_width as f32 / MINI_WIDTH;
+    let transform = Transform::from_scale(scale, scale);
+    paint_capsule_rect(
+        &mut pixmap,
+        PILL_EDGE_INSET,
+        PILL_EDGE_INSET,
+        MINI_WIDTH - 2.0 * PILL_EDGE_INSET,
+        MINI_HEIGHT - 2.0 * PILL_EDGE_INSET,
+        state,
+        transform,
+    )?;
+    symmetrize_horizontal(&mut pixmap);
+    symmetrize_vertical_region(&mut pixmap, 0.0, MINI_HEIGHT, scale);
+    Some(pixmap.take())
+}
+
 /// Paint the standalone main pill (no top bar) with the given lifecycle
 /// border. Returns `None` only when the capsule geometry itself is
 /// degenerate, which indicates a programming error rather than a transient
@@ -153,26 +186,42 @@ fn paint_standalone_pill(
     state: PillState,
     transform: Transform,
 ) -> Option<()> {
-    let outer = PILL_EDGE_INSET;
+    paint_capsule_rect(
+        pixmap,
+        PILL_EDGE_INSET,
+        MAIN_TOP + PILL_EDGE_INSET,
+        WIDTH - 2.0 * PILL_EDGE_INSET,
+        PILL_HEIGHT - 2.0 * PILL_EDGE_INSET,
+        state,
+        transform,
+    )
+}
+
+/// Paint one bordered capsule over the background inside the given logical
+/// rect. Shared by the standalone dictate pill and the mini text-action
+/// pill so both keep the same border treatment.
+fn paint_capsule_rect(
+    pixmap: &mut Pixmap,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    state: PillState,
+    transform: Transform,
+) -> Option<()> {
     fill_capsule(
         pixmap,
-        capsule_path(
-            outer,
-            MAIN_TOP + outer,
-            WIDTH - 2.0 * outer,
-            PILL_HEIGHT - 2.0 * outer,
-        )?,
+        capsule_path(x, y, width, height)?,
         state.border(),
         transform,
     );
-    let inner = outer + BORDER_WIDTH;
     fill_capsule(
         pixmap,
         capsule_path(
-            inner,
-            MAIN_TOP + inner,
-            WIDTH - 2.0 * inner,
-            PILL_HEIGHT - 2.0 * inner,
+            x + BORDER_WIDTH,
+            y + BORDER_WIDTH,
+            width - 2.0 * BORDER_WIDTH,
+            height - 2.0 * BORDER_WIDTH,
         )?,
         BACKGROUND,
         transform,
@@ -444,7 +493,9 @@ pub fn bar_specs(values: &[f32], area_width: f32, bar_count: usize) -> Vec<BarSp
 
 #[cfg(test)]
 mod tests {
-    use super::{BORDER_WIDTH, HEIGHT, MAIN_TOP, PILL_HEIGHT, PillState, WIDTH};
+    use super::{
+        BORDER_WIDTH, HEIGHT, MAIN_TOP, MINI_HEIGHT, MINI_WIDTH, PILL_HEIGHT, PillState, WIDTH,
+    };
 
     #[test]
     fn main_pill_keeps_the_approved_geometry() {
@@ -655,5 +706,25 @@ mod tests {
     fn connected_body_builds_for_both_border_insets() {
         assert!(super::connected_body_path(super::PILL_EDGE_INSET).is_some());
         assert!(super::connected_body_path(super::PILL_EDGE_INSET + super::BORDER_WIDTH).is_some());
+    }
+
+    /// The text-action pill must stay visible at every DPI the layered
+    /// window presents: grammar and question give no other feedback while
+    /// the LLM request is in flight.
+    #[test]
+    fn mini_pill_stays_visible_at_presented_scales() {
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let width = (MINI_WIDTH * scale).round().max(1.0) as u32;
+            let height = (MINI_HEIGHT * scale).round().max(1.0) as u32;
+            let pixels = super::render_mini_rgba(width, height, PillState::Working)
+                .expect("mini pill must render");
+            assert_eq!(pixels.len(), (width as usize) * (height as usize) * 4);
+            let opaque = pixels.chunks_exact(4).filter(|pixel| pixel[3] > 10).count();
+            let total = pixels.len() / 4;
+            assert!(
+                opaque * 2 > total,
+                "mini pill went transparent at scale={scale}: opaque={opaque}/{total}"
+            );
+        }
     }
 }

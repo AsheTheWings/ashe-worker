@@ -120,6 +120,7 @@ pub enum Win32Command {
         state: pill_renderer::PillState,
         main_text: Option<String>,
         top_bar: Option<TopBarContent>,
+        mini: bool,
     },
     Shutdown,
 }
@@ -146,6 +147,7 @@ struct OverlayUpdate {
     state: pill_renderer::PillState,
     main_text: Option<String>,
     top_bar: Option<TopBarContent>,
+    mini: bool,
 }
 
 thread_local! {
@@ -498,6 +500,7 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
                 state,
                 main_text,
                 top_bar,
+                mini,
             } => {
                 pending_overlay = Some(OverlayUpdate {
                     x,
@@ -507,6 +510,7 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
                     state,
                     main_text,
                     top_bar,
+                    mini,
                 });
             }
             Win32Command::Shutdown => {
@@ -535,8 +539,8 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
             Err(error) => {
                 logger::info(format!(
                     "Native layered overlay recreation failed: {error:#} \
-                     state={:?} pos=({},{})",
-                    update.state, update.x, update.y,
+                     state={:?} mini={} pos=({},{})",
+                    update.state, update.mini, update.x, update.y,
                 ));
                 state.overlay_error_logged = true;
             }
@@ -553,6 +557,7 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
             state: update.state,
             main_text: update.main_text.as_deref(),
             top_bar: update.top_bar.as_ref(),
+            mini: update.mini,
         }) {
             Ok(()) => state.overlay_error_logged = false,
             Err(error) if !state.overlay_error_logged => {
@@ -560,11 +565,12 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
                 // why dictation kept working while no pill was visible.
                 logger::info(format!(
                     "Native layered overlay update failed: {error:#} \
-                     visible={} state={:?} bars={} top_bar={} pos=({},{})",
+                     visible={} state={:?} bars={} top_bar={} mini={} pos=({},{})",
                     update.visible,
                     update.state,
                     update.bars.len(),
                     update.top_bar.is_some(),
+                    update.mini,
                     update.x,
                     update.y,
                 ));

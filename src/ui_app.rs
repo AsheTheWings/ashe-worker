@@ -186,12 +186,13 @@ impl UiApp {
                 DictationState::Starting | DictationState::Listening | DictationState::Typing => {
                     pill_renderer::PillState::Listening
                 }
-                DictationState::Transcribing | DictationState::Inserting => {
+                DictationState::Transcribing
+                | DictationState::Inserting
+                | DictationState::FixingGrammar
+                | DictationState::AnsweringQuestion => {
                     pill_renderer::PillState::Working
                 }
-                DictationState::Idle
-                | DictationState::FixingGrammar
-                | DictationState::AnsweringQuestion => pill_renderer::PillState::Idle,
+                DictationState::Idle => pill_renderer::PillState::Idle,
             }
         }
     }
@@ -1080,6 +1081,13 @@ impl UiApp {
     fn sync_overlay(&self) {
         let position = self.position.unwrap_or(Point::new(120.0, 120.0));
         let top_bar = self.top_bar_content();
+        // Grammar and question show a compact pill with a single status
+        // word while the LLM request is in flight; dictation keeps the
+        // full pill with visualizer and status bar.
+        let mini = matches!(
+            self.state,
+            DictationState::FixingGrammar | DictationState::AnsweringQuestion
+        );
         self.send_win32(Win32Command::UpdateOverlay {
             x: position.x,
             y: position.y,
@@ -1090,8 +1098,9 @@ impl UiApp {
                 Vec::new()
             },
             state: self.pill_state(),
-            main_text: None,
+            main_text: mini.then(|| "processing".to_string()),
             top_bar,
+            mini,
         });
     }
 
