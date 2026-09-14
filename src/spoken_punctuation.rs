@@ -9,9 +9,10 @@
 //!
 //! The transform runs on the timed word stream rather than the plain text:
 //! symbols attach to neighboring content tokens (which keep their
-//! timestamps), and the plain text is rebuilt with the same spacing rules
-//! the composition uses. Say `literal` before a command to keep the words,
-//! e.g. `literal comma` inserts the word "comma".
+//! timestamps) so the word-level composition mapping keeps working, and
+//! the plain text is rebuilt with the same spacing rules the composition
+//! uses. Say `literal` before a command to keep the words, e.g. `literal
+//! comma` inserts the word "comma".
 
 use crate::stt::{Transcript, TranscriptWord};
 use crate::logger;
