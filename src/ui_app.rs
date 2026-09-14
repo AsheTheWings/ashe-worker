@@ -695,12 +695,13 @@ impl UiApp {
         self.send_win32(Win32Command::SetTooltip(
             "Ashe Worker - Transcribing... - Win+Shift+H".to_string(),
         ));
+        let word_timestamps = composition.requires_word_timestamps();
         let pcm = composition.take_audio();
         let sample_rate = composition.sample_rate();
         let config = self.config.clone();
         Task::perform(
             async move {
-                let transcript = transcribe_pcm(config, sample_rate, pcm)
+                let transcript = transcribe_pcm(config, sample_rate, pcm, word_timestamps)
                     .await
                     .map_err(|err| format!("{err:#}"))?;
                 composition

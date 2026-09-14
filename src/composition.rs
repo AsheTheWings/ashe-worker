@@ -354,6 +354,16 @@ impl FinalComposition {
         std::mem::take(&mut self.audio_pcm)
     }
 
+    /// Word alignment is needed only to split one full-context transcript
+    /// around insertions between multiple speech ranges.
+    pub fn requires_word_timestamps(&self) -> bool {
+        self.speech_count > 1
+            && self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, CompositionEntry::Insertion(_)))
+    }
+
     pub fn assemble(&self, transcript: Option<&Transcript>) -> Result<String> {
         if self.speech_count == 0 {
             return Ok(self.assemble_entries(&[]));
@@ -725,6 +735,27 @@ mod tests {
             words: vec![],
         };
         assert!(final_composition.assemble(Some(&transcript)).is_err());
+    }
+
+    #[test]
+    fn alignment_is_requested_only_for_multiple_speech_ranges_with_insertions() {
+        let mut single = CompositionSession::new(0, 100);
+        single.push_typed_text("before");
+        single.commit_insertion();
+        single.push_speech(pcm(2_000, 100));
+        assert!(!single.finish().requires_word_timestamps());
+
+        let mut uninterrupted = CompositionSession::new(0, 100);
+        uninterrupted.push_speech(pcm(2_000, 100));
+        uninterrupted.push_speech(pcm(2_000, 100));
+        assert!(!uninterrupted.finish().requires_word_timestamps());
+
+        let mut interleaved = CompositionSession::new(0, 100);
+        interleaved.push_speech(pcm(2_000, 100));
+        interleaved.push_typed_text("typed");
+        interleaved.commit_insertion();
+        interleaved.push_speech(pcm(2_000, 100));
+        assert!(interleaved.finish().requires_word_timestamps());
     }
 
     #[test]

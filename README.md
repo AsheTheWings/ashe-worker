@@ -63,12 +63,13 @@ Natural pauses remain intact. Once silence reaches five seconds, dead air is
 compacted locally and the bar shows `silence skipped` instead of the timer;
 compacted audio is never submitted as a separate request. When the session
 finishes, all retained speech is sent once to the self-hosted transcription
-engine behind the Ashe API server (Whisper, requires `ASHE_STT_TOKEN`), then
-interleaved with exact typed and
-pasted content using word timestamps. The result is inserted once into the
-application where dictation started, with no LLM polishing. While
-transcription runs, the pill shows `processing...`. Dictation requires
-`ASHE_STT_TOKEN`.
+engine behind the Ashe API server (Whisper, requires `ASHE_STT_TOKEN`). Word
+alignment is skipped when the full-context transcript can be inserted
+directly, and retained only when multiple speech ranges must be interleaved
+with exact typed or pasted content. Transient requests retry once. The result
+is inserted once into the application where dictation started, with no LLM
+polishing. While transcription runs, the pill shows `processing...`.
+Dictation requires `ASHE_STT_TOKEN`.
 
 Spoken punctuation is converted automatically: say `comma`, `period`,
 `question mark`, `exclamation mark`, `colon`, `semicolon`, `double quote`,
