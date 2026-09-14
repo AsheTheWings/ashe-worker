@@ -85,6 +85,7 @@ pub enum Win32Event {
 pub enum Win32Command {
     SetActive(bool),
     SetKeyboardCapture(bool),
+    SetEscapeCapture(bool),
     EndTyping,
     SetFollowCursor(bool),
     SetTooltip(String),
@@ -160,6 +161,10 @@ struct KeyboardHookState {
     physical_down: [bool; 256],
     captured: [bool; 256],
     accepting: bool,
+    /// Forward everything except a bare Escape. Text actions (grammar,
+    /// question) want a cancel key without stealing typing from the
+    /// foreground app while the request is in flight.
+    cancel_only: bool,
     typing: bool,
     dead_key_pending: bool,
 }
@@ -422,7 +427,10 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
                 state.active = active;
             }
             Win32Command::SetKeyboardCapture(active) => {
-                set_keyboard_capture(state, active);
+                set_keyboard_capture(state, active, false);
+            }
+            Win32Command::SetEscapeCapture(active) => {
+                set_keyboard_capture(state, active, true);
             }
             Win32Command::EndTyping => {
                 KEYBOARD_HOOK_STATE.with(|hook_state| {
@@ -604,11 +612,12 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
     }
 }
 
-unsafe fn set_keyboard_capture(state: &mut ServiceState, active: bool) {
+unsafe fn set_keyboard_capture(state: &mut ServiceState, active: bool, cancel_only: bool) {
     if active && state.keyboard_hook.is_some() {
         KEYBOARD_HOOK_STATE.with(|hook_state| {
             if let Some(hook_state) = hook_state.borrow_mut().as_mut() {
                 hook_state.accepting = true;
+                hook_state.cancel_only = cancel_only;
             }
         });
         return;
@@ -645,6 +654,7 @@ unsafe fn set_keyboard_capture(state: &mut ServiceState, active: bool) {
             physical_down,
             captured: [false; 256],
             accepting: true,
+            cancel_only,
             typing: false,
             dead_key_pending: false,
         });
@@ -769,6 +779,9 @@ impl KeyboardHookState {
 
         let modifiers = ModifierState::from_keyboard_state(&self.keyboard_state);
         let action = classify_key(key.vkCode, modifiers, self.typing);
+        let Some(action) = effective_action(action, self.cancel_only) else {
+            return false;
+        };
         match action {
             CaptureAction::Pass => false,
             CaptureAction::Backspace => {
@@ -1010,6 +1023,17 @@ fn classify_key(vk: u32, modifiers: ModifierState, typing: bool) -> CaptureActio
         CaptureAction::Text
     } else {
         CaptureAction::Pass
+    }
+}
+
+/// Narrow a classified key for escape-only capture. Text actions run while
+/// the user keeps typing in the foreground app, so only the cancel key may
+/// be intercepted; everything else passes through untouched.
+fn effective_action(action: CaptureAction, cancel_only: bool) -> Option<CaptureAction> {
+    if cancel_only && !matches!(action, CaptureAction::Cancel) {
+        None
+    } else {
+        Some(action)
     }
 }
 
@@ -1388,7 +1412,10 @@ fn message_box(hwnd: HWND, text: &str, title: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureAction, KeyboardHookState, ModifierState, Win32Event, classify_key};
+    use super::{
+        CaptureAction, KeyboardHookState, ModifierState, Win32Event, classify_key,
+        effective_action,
+    };
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_ESCAPE, VK_LSHIFT, VK_RETURN};
     use windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT;
 
@@ -1478,6 +1505,35 @@ mod tests {
     }
 
     #[test]
+    fn escape_only_capture_forwards_everything_but_cancel() {
+        assert_eq!(
+            effective_action(CaptureAction::Cancel, true),
+            Some(CaptureAction::Cancel)
+        );
+        for action in [
+            CaptureAction::Text,
+            CaptureAction::Paste,
+            CaptureAction::Backspace,
+            CaptureAction::Submit,
+            CaptureAction::LineBreak,
+            CaptureAction::Pass,
+        ] {
+            assert_eq!(effective_action(action, true), None);
+        }
+        for action in [
+            CaptureAction::Text,
+            CaptureAction::Paste,
+            CaptureAction::Backspace,
+            CaptureAction::Submit,
+            CaptureAction::LineBreak,
+            CaptureAction::Pass,
+            CaptureAction::Cancel,
+        ] {
+            assert_eq!(effective_action(action, false), Some(action));
+        }
+    }
+
+    #[test]
     fn enter_auto_repeat_emits_only_one_submit() {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let mut state = KeyboardHookState {
@@ -1486,6 +1542,7 @@ mod tests {
             physical_down: [false; 256],
             captured: [false; 256],
             accepting: true,
+            cancel_only: false,
             typing: true,
             dead_key_pending: false,
         };
@@ -1514,6 +1571,7 @@ mod tests {
             physical_down: [false; 256],
             captured: [false; 256],
             accepting: true,
+            cancel_only: false,
             typing: true,
             dead_key_pending: false,
         };
@@ -1536,6 +1594,7 @@ mod tests {
             physical_down: [false; 256],
             captured: [false; 256],
             accepting: true,
+            cancel_only: false,
             typing: false,
             dead_key_pending: false,
         };

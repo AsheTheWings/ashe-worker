@@ -39,6 +39,9 @@ collection. Right-click it to control features, reload configuration, open logs,
 | `Win+Shift+Q` | Ask a question using selected text |
 | `Ctrl+Alt+V` | Upload a clipboard image and paste its remote path |
 
+Pressing `Esc` cancels an in-flight grammar or question request; only the
+cancel key is captured, so typing keeps reaching the foreground app.
+
 During dictation, microphone audio is buffered locally while the pill overlay
 shows a live voice spectrum. Printable input and `Ctrl+V` switch to a private
 typing buffer without writing into the foreground application. A status bar is

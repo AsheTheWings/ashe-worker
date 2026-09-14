@@ -406,6 +406,10 @@ impl UiApp {
         self.current_audio.take();
         self.spectrum.reset();
         self.session = None;
+        // The in-flight text-action request (if any) is discarded by the
+        // state guard when it completes; drop it here so no stale action
+        // survives the cancel.
+        self.text_action = None;
         self.clear_dictation_bar();
         self.state = DictationState::Idle;
         self.visible = false;
@@ -932,6 +936,10 @@ impl UiApp {
         self.error = None;
         self.send_win32(Win32Command::SetTooltip(tooltip.to_string()));
         self.send_win32(Win32Command::SetFollowCursor(true));
+        // Capture Escape only: the user keeps typing in the foreground app
+        // while the request runs, so full keyboard capture would steal
+        // keystrokes. Teardown disables capture on every exit path.
+        self.send_win32(Win32Command::SetEscapeCapture(true));
 
         let config = self.config.clone();
         let llm_task = Task::perform(
@@ -988,6 +996,8 @@ impl UiApp {
         self.polished = Some(text);
         self.state = DictationState::Inserting;
         self.status = "Inserting...".to_string();
+        // Commit point: the paste is in flight, so Escape no longer cancels.
+        self.send_win32(Win32Command::SetKeyboardCapture(false));
         self.send_win32(Win32Command::InjectText {
             target_hwnd,
             text: inject_text,
