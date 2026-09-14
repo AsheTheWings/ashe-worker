@@ -61,21 +61,37 @@ pub async fn transcribe_pcm(
         seconds,
     ));
     let started = Instant::now();
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-        .context("failed to create HTTP client")?;
     let wav = encode_wav_mono16(&pcm, sample_rate);
     drop(pcm);
-    let audio_url = wav_data_uri(&wav);
-    drop(wav);
     let encoded = Instant::now();
-    let queued = submit_transcription(&client, &config, audio_url).await?;
-    let submitted = Instant::now();
-    wait_completed(&client, &config.fal_api_key, &queued).await?;
-    let completed = Instant::now();
-    let fetched = fetch_transcript(&client, &config.fal_api_key, &queued).await?;
+    // The self-hosted engine takes the WAV directly; the cloud queue takes
+    // it as a data URI. Either way the result below is a timed transcript.
+    let fetched = if config.use_self_hosted_stt() {
+        crate::stt::transcribe_wav(&config, wav).await?
+    } else {
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .context("failed to create HTTP client")?;
+        let audio_url = wav_data_uri(&wav);
+        drop(wav);
+        let queued = submit_transcription(&client, &config, audio_url).await?;
+        let submitted = Instant::now();
+        wait_completed(&client, &config.fal_api_key, &queued).await?;
+        let completed = Instant::now();
+        let fetched = fetch_transcript(&client, &config.fal_api_key, &queued).await?;
+        let finished_fetch = Instant::now();
+        logger::info(format!(
+            "fal transcript chars={} encode_ms={} submit_ms={} queue_ms={} result_ms={}",
+            fetched.text.len(),
+            encoded.duration_since(started).as_millis(),
+            submitted.duration_since(encoded).as_millis(),
+            completed.duration_since(submitted).as_millis(),
+            finished_fetch.duration_since(completed).as_millis()
+        ));
+        fetched
+    };
     // Verbalized punctuation ("comma", "double quote") arrives as literal
     // words: the transcription model has no dictation-command layer, so the
     // conversion runs here, on the timed word stream the composition
@@ -85,15 +101,10 @@ pub async fn transcribe_pcm(
     } else {
         fetched
     };
-    let finished = Instant::now();
     logger::info(format!(
-        "fal transcript chars={} encode_ms={} submit_ms={} queue_ms={} result_ms={} total_ms={}",
+        "transcription chars={} total_ms={}",
         transcript.text.len(),
-        encoded.duration_since(started).as_millis(),
-        submitted.duration_since(encoded).as_millis(),
-        completed.duration_since(submitted).as_millis(),
-        finished.duration_since(completed).as_millis(),
-        finished.duration_since(started).as_millis()
+        started.elapsed().as_millis()
     ));
     Ok(transcript)
 }

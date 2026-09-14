@@ -63,7 +63,9 @@ Natural pauses remain intact. Once silence reaches five seconds, dead air is
 compacted locally and the bar shows `silence skipped` instead of the timer;
 compacted audio is never submitted as a separate request. When the session
 finishes, all retained speech is sent once through the fal.ai queue API
-(Scribe v2), then interleaved with exact typed and
+(`ASHE_STT_BACKEND=fal`, Scribe v2) or the self-hosted engine behind the
+Ashe API server (`ASHE_STT_BACKEND=selfhosted`, requires `ASHE_STT_TOKEN`),
+then interleaved with exact typed and
 pasted content using word timestamps. The result is inserted once into the
 application where dictation started, with no LLM polishing. While fal.ai is
 working, the pill shows `processing...`. Dictation requires `FAL_KEY`.

@@ -25,6 +25,8 @@ const COMPILED_ARCHIVE_RECIPIENT_JSON: &str = match option_env!("ASHE_ARCHIVE_RE
 pub struct AppConfig {
     pub fal_api_key: String,
     pub fal_language: String,
+    pub stt_backend: String,
+    pub stt_token: String,
     pub spoken_punctuation: bool,
     pub output_sample_rate: u32,
     pub tera_api_key: String,
@@ -75,6 +77,8 @@ impl AppConfig {
         Self {
             fal_api_key: std::env::var("FAL_KEY").unwrap_or_default(),
             fal_language: std::env::var("FAL_LANGUAGE").unwrap_or_else(|_| "eng".to_string()),
+            stt_backend: std::env::var("ASHE_STT_BACKEND").unwrap_or_else(|_| "fal".to_string()),
+            stt_token: std::env::var("ASHE_STT_TOKEN").unwrap_or_default(),
             spoken_punctuation: read_bool("ASHE_SPOKEN_PUNCTUATION", true),
             output_sample_rate: read_output_sample_rate(),
             tera_api_key: std::env::var("TERA_API_KEY").unwrap_or_default(),
@@ -150,13 +154,28 @@ impl AppConfig {
     }
 
     pub fn validate_for_dictation(&self) -> Result<()> {
-        if self.fal_api_key.trim().is_empty() {
-            return Err(anyhow!("FAL_KEY is missing"));
-        }
         if !(8_000..=192_000).contains(&self.output_sample_rate) {
             return Err(anyhow!(
                 "ASHE_OUTPUT_SAMPLE_RATE must be between 8000 and 192000"
             ));
+        }
+        if self.use_self_hosted_stt() {
+            return self.validate_for_self_hosted_stt();
+        }
+        if self.fal_api_key.trim().is_empty() {
+            return Err(anyhow!("FAL_KEY is missing"));
+        }
+        Ok(())
+    }
+
+    pub fn use_self_hosted_stt(&self) -> bool {
+        self.stt_backend.trim().eq_ignore_ascii_case("selfhosted")
+    }
+
+    pub fn validate_for_self_hosted_stt(&self) -> Result<()> {
+        self.worker_endpoint("/v1/stt/transcribe")?;
+        if self.stt_token.trim().is_empty() {
+            return Err(anyhow!("ASHE_STT_TOKEN is missing"));
         }
         Ok(())
     }
@@ -200,12 +219,13 @@ impl AppConfig {
 
     pub fn log_summary(&self) -> String {
         format!(
-            "language={} output_sample_rate={} fal_api_key_present={} grammar_model={} question_model={} journal_model={} tera_api_key_present={} reasoning_effort_present={} activity_enabled={} activity_artifacts={} activity_capture_interval={}s activity_max_frame_gap={}s context_blocks={} summary_max_chars={} daily_report_enabled={} daily_grace_minutes={} archive_recipient_present={} archive_plaintext_days={} archive_upload_configured={} paste_upload_configured={}",
+            "language={} stt_backend={} output_sample_rate={} fal_api_key_present={} grammar_model={} question_model={} journal_model={} tera_api_key_present={} reasoning_effort_present={} activity_enabled={} activity_artifacts={} activity_capture_interval={}s activity_max_frame_gap={}s context_blocks={} summary_max_chars={} daily_report_enabled={} daily_grace_minutes={} archive_recipient_present={} archive_plaintext_days={} archive_upload_configured={} paste_upload_configured={}",
             if self.fal_language.trim().is_empty() {
                 "auto".to_string()
             } else {
                 self.fal_language.clone()
             },
+            self.stt_backend.trim(),
             self.output_sample_rate,
             !self.fal_api_key.trim().is_empty(),
             self.grammar_model,
