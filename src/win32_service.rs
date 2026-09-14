@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
@@ -132,6 +132,7 @@ struct ServiceState {
     activity_running: bool,
     activity_status: String,
     last_artifacts_open: Option<Instant>,
+    instance: HMODULE,
     overlay: Option<NativeOverlay>,
     overlay_error_logged: bool,
     keyboard_hook: Option<HHOOK>,
@@ -225,6 +226,7 @@ unsafe fn run_message_loop(
         activity_running: false,
         activity_status: "activity tracking starting".to_string(),
         last_artifacts_open: None,
+        instance,
         overlay,
         overlay_error_logged: false,
         keyboard_hook: None,
@@ -515,7 +517,34 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
             }
         }
     }
-    if let (Some(update), Some(overlay)) = (pending_overlay, state.overlay.as_mut()) {
+    // Recover from a failed overlay creation without hiding the failure.
+    // Dictation keeps working through audio/transcription/injection even
+    // when the pill never appears, so retry once per visible run and keep
+    // the throttled log so a missing pill is never silent.
+    if state.overlay.is_none()
+        && let Some(update) = pending_overlay.as_ref()
+        && update.visible
+        && !state.overlay_error_logged
+    {
+        match NativeOverlay::new(state.instance) {
+            Ok(overlay) => {
+                state.overlay = Some(overlay);
+                state.overlay_error_logged = false;
+                logger::info("Native layered overlay recreated after missing");
+            }
+            Err(error) => {
+                logger::info(format!(
+                    "Native layered overlay recreation failed: {error:#} \
+                     state={:?} pos=({},{})",
+                    update.state, update.x, update.y,
+                ));
+                state.overlay_error_logged = true;
+            }
+        }
+    }
+    if let (Some(update), Some(overlay)) =
+        (pending_overlay.as_ref(), state.overlay.as_mut())
+    {
         match overlay.update(OverlayFrame {
             x: update.x,
             y: update.y,
@@ -527,10 +556,44 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
         }) {
             Ok(()) => state.overlay_error_logged = false,
             Err(error) if !state.overlay_error_logged => {
-                logger::info(format!("Native layered overlay update failed: {error:#}"));
+                // Include the requested frame so a single log line explains
+                // why dictation kept working while no pill was visible.
+                logger::info(format!(
+                    "Native layered overlay update failed: {error:#} \
+                     visible={} state={:?} bars={} top_bar={} pos=({},{})",
+                    update.visible,
+                    update.state,
+                    update.bars.len(),
+                    update.top_bar.is_some(),
+                    update.x,
+                    update.y,
+                ));
                 state.overlay_error_logged = true;
             }
             Err(_) => {}
+        }
+    }
+    // A failed overlay creation must not permanently hide dictation UI
+    // while the feature itself keeps working. Surface the gap loudly so a
+    // missing pill is never mistaken for an idle worker.
+    // If creation still failed (or was throttled after a previous failure),
+    // keep the gap visible in logs without spamming every 16 ms frame.
+    if let Some(update) = pending_overlay.as_ref()
+        && state.overlay.is_none()
+    {
+        if update.visible {
+            if !state.overlay_error_logged {
+                logger::info(format!(
+                    "Native layered overlay missing while visible requested \
+                     state={:?} pos=({},{})",
+                    update.state, update.x, update.y,
+                ));
+                state.overlay_error_logged = true;
+            }
+        } else {
+            // Nothing visible requested: reset so the next visible gap
+            // logs again instead of staying silent.
+            state.overlay_error_logged = false;
         }
     }
 }

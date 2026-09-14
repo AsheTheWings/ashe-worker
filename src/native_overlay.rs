@@ -17,10 +17,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, HTTRANSPARENT, RegisterClassExW, SW_HIDE,
-    SW_SHOWNOACTIVATE, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WM_ERASEBKGND,
-    WM_NCHITTEST, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, HTTRANSPARENT, IsWindowVisible,
+    RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
+    WINDOW_EX_STYLE, WM_ERASEBKGND, WM_NCHITTEST, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const CLASS_NAME: &str = "AsheWorkerLayeredOverlay";
@@ -165,13 +165,25 @@ impl NativeOverlay {
         )
         .context("UpdateLayeredWindow failed")?;
 
-        if !self.visible {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        // Recover when Windows hides the overlay out from under us (display
+        // change, workspace switch, DWM reset). The internal flag alone
+        // cannot detect an external hide, which would otherwise leave
+        // dictation working with no visible pill and no further ShowWindow
+        // call to recover it.
+        let actually_visible = IsWindowVisible(self.hwnd).as_bool();
+        if !self.visible || !actually_visible {
+            if ShowWindow(self.hwnd, SW_SHOWNOACTIVATE).as_bool() || !actually_visible {
+                logger::info(format!(
+                    "Native layered overlay shown size={}x{} scale={scale:.2} \
+                     tracked_visible={} actual_visible={actually_visible} at=({},{})",
+                    width,
+                    height,
+                    self.visible,
+                    destination.x,
+                    destination.y,
+                ));
+            }
             self.visible = true;
-            logger::info(format!(
-                "Native layered overlay shown size={}x{} scale={scale:.2}",
-                width, height
-            ));
         }
         Ok(())
     }

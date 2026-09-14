@@ -73,6 +73,11 @@ impl PillState {
 ///
 /// Windows presentation swaps these bytes to premultiplied BGRA before
 /// passing the frame to `UpdateLayeredWindow`.
+///
+/// The pill background must render even if the connected top-bar geometry
+/// cannot be built, so a path construction failure falls back to a plain
+/// pill instead of returning `None` and leaving the overlay hidden while
+/// dictation itself keeps working.
 pub fn render_rgba(
     pixel_width: u32,
     pixel_height: u32,
@@ -86,44 +91,24 @@ pub fn render_rgba(
     let transform = Transform::from_scale(scale, scale);
 
     if show_top_bar {
-        fill_capsule(
-            &mut pixmap,
-            connected_body_path(PILL_EDGE_INSET)?,
-            state.border(),
-            transform,
-        );
-        fill_capsule(
-            &mut pixmap,
-            connected_body_path(PILL_EDGE_INSET + BORDER_WIDTH)?,
-            BACKGROUND,
-            transform,
-        );
+        match (
+            connected_body_path(PILL_EDGE_INSET),
+            connected_body_path(PILL_EDGE_INSET + BORDER_WIDTH),
+        ) {
+            (Some(outer), Some(inner)) => {
+                fill_capsule(&mut pixmap, outer, state.border(), transform);
+                fill_capsule(&mut pixmap, inner, BACKGROUND, transform);
+            }
+            // Geometry must never hide the dictation UI. Fall back to the
+            // standalone pill so a future constant change cannot turn every
+            // frame into a silent `None`.
+            _ => {
+                paint_standalone_pill(&mut pixmap, state, transform)?;
+            }
+        }
         symmetrize_horizontal(&mut pixmap);
     } else {
-        let outer = PILL_EDGE_INSET;
-        fill_capsule(
-            &mut pixmap,
-            capsule_path(
-                outer,
-                MAIN_TOP + outer,
-                WIDTH - 2.0 * outer,
-                PILL_HEIGHT - 2.0 * outer,
-            )?,
-            state.border(),
-            transform,
-        );
-        let inner = outer + BORDER_WIDTH;
-        fill_capsule(
-            &mut pixmap,
-            capsule_path(
-                inner,
-                MAIN_TOP + inner,
-                WIDTH - 2.0 * inner,
-                PILL_HEIGHT - 2.0 * inner,
-            )?,
-            BACKGROUND,
-            transform,
-        );
+        paint_standalone_pill(&mut pixmap, state, transform)?;
         symmetrize_horizontal(&mut pixmap);
     }
 
@@ -157,6 +142,42 @@ pub fn render_rgba(
         symmetrize_vertical_region(&mut pixmap, MAIN_TOP, PILL_HEIGHT, scale);
     }
     Some(pixmap.take())
+}
+
+/// Paint the standalone main pill (no top bar) with the given lifecycle
+/// border. Returns `None` only when the capsule geometry itself is
+/// degenerate, which indicates a programming error rather than a transient
+/// frame condition.
+fn paint_standalone_pill(
+    pixmap: &mut Pixmap,
+    state: PillState,
+    transform: Transform,
+) -> Option<()> {
+    let outer = PILL_EDGE_INSET;
+    fill_capsule(
+        pixmap,
+        capsule_path(
+            outer,
+            MAIN_TOP + outer,
+            WIDTH - 2.0 * outer,
+            PILL_HEIGHT - 2.0 * outer,
+        )?,
+        state.border(),
+        transform,
+    );
+    let inner = outer + BORDER_WIDTH;
+    fill_capsule(
+        pixmap,
+        capsule_path(
+            inner,
+            MAIN_TOP + inner,
+            WIDTH - 2.0 * inner,
+            PILL_HEIGHT - 2.0 * inner,
+        )?,
+        BACKGROUND,
+        transform,
+    );
+    Some(())
 }
 
 fn alpha(value: f32) -> u8 {
@@ -571,5 +592,68 @@ mod tests {
         let offset = ((sample_y * width + sample_x) * 4 + 3) as usize;
         assert_eq!(hidden[offset], 0);
         assert!(shown[offset] > 0);
+    }
+
+    /// Dictation must never run with an invisible pill: every lifecycle
+    /// state used by the overlay has to produce an opaque frame at the
+    /// DPIs the layered window actually presents, with or without the
+    /// always-on status bar.
+    #[test]
+    fn dictation_frames_stay_visible_in_every_lifecycle_state() {
+        let states = [
+            PillState::Listening,
+            PillState::Working,
+            PillState::Error,
+            PillState::Idle,
+        ];
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let width = (WIDTH * scale).round().max(1.0) as u32;
+            let main_top = (MAIN_TOP * scale).round().max(0.0) as u32;
+            let main_height = (PILL_HEIGHT * scale).round().max(1.0) as u32;
+            let height = main_top.saturating_add(main_height).max(1);
+            for state in states {
+                for show_top_bar in [false, true] {
+                    let pixels = super::render_rgba(
+                        width,
+                        height,
+                        &[0.2; 64],
+                        state,
+                        true,
+                        show_top_bar,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "pill must render for state={state:?} \
+                             top_bar={show_top_bar} scale={scale}"
+                        )
+                    });
+                    let opaque = pixels
+                        .chunks_exact(4)
+                        .filter(|pixel| pixel[3] > 10)
+                        .count();
+                    let total = pixels.len() / 4;
+                    // The pill background alone covers well over half the
+                    // window even before bars or text. Anything far below
+                    // that means the frame went transparent while dictation
+                    // itself would keep working.
+                    assert!(
+                        opaque * 2 > total,
+                        "pill went transparent for state={state:?} \
+                         top_bar={show_top_bar} scale={scale}: \
+                         opaque={opaque}/{total}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The connected top-bar body must build for both the outer border and
+    /// the inset background. A `None` here used to propagate out of
+    /// `render_rgba` as a silent `None` frame, which left dictation working
+    /// with no visible UI and only one log line.
+    #[test]
+    fn connected_body_builds_for_both_border_insets() {
+        assert!(super::connected_body_path(super::PILL_EDGE_INSET).is_some());
+        assert!(super::connected_body_path(super::PILL_EDGE_INSET + super::BORDER_WIDTH).is_some());
     }
 }
