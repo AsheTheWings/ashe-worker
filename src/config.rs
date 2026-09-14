@@ -24,9 +24,7 @@ const COMPILED_ARCHIVE_RECIPIENT_JSON: &str = match option_env!("ASHE_ARCHIVE_RE
 #[derive(Clone)]
 pub struct AppConfig {
     pub fal_api_key: String,
-    pub fal_stt_model: String,
     pub fal_language: String,
-    pub fal_keyterms: Vec<String>,
     pub spoken_punctuation: bool,
     pub output_sample_rate: u32,
     pub tera_api_key: String,
@@ -76,16 +74,7 @@ impl AppConfig {
 
         Self {
             fal_api_key: std::env::var("FAL_KEY").unwrap_or_default(),
-            fal_stt_model: std::env::var("FAL_STT_MODEL")
-                .unwrap_or_else(|_| "fal-ai/elevenlabs/speech-to-text/scribe-v2".to_string()),
             fal_language: std::env::var("FAL_LANGUAGE").unwrap_or_else(|_| "eng".to_string()),
-            fal_keyterms: std::env::var("FAL_KEYTERMS")
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect(),
             spoken_punctuation: read_bool("ASHE_SPOKEN_PUNCTUATION", true),
             output_sample_rate: read_output_sample_rate(),
             tera_api_key: std::env::var("TERA_API_KEY").unwrap_or_default(),
@@ -164,9 +153,6 @@ impl AppConfig {
         if self.fal_api_key.trim().is_empty() {
             return Err(anyhow!("FAL_KEY is missing"));
         }
-        if self.fal_stt_model.trim().is_empty() {
-            return Err(anyhow!("FAL_STT_MODEL is empty"));
-        }
         if !(8_000..=192_000).contains(&self.output_sample_rate) {
             return Err(anyhow!(
                 "ASHE_OUTPUT_SAMPLE_RATE must be between 8000 and 192000"
@@ -214,14 +200,12 @@ impl AppConfig {
 
     pub fn log_summary(&self) -> String {
         format!(
-            "fal_stt_model={} language={} keyterms={} output_sample_rate={} fal_api_key_present={} grammar_model={} question_model={} journal_model={} tera_api_key_present={} reasoning_effort_present={} activity_enabled={} activity_artifacts={} activity_capture_interval={}s activity_max_frame_gap={}s context_blocks={} summary_max_chars={} daily_report_enabled={} daily_grace_minutes={} archive_recipient_present={} archive_plaintext_days={} archive_upload_configured={} paste_upload_configured={}",
-            self.fal_stt_model,
+            "language={} output_sample_rate={} fal_api_key_present={} grammar_model={} question_model={} journal_model={} tera_api_key_present={} reasoning_effort_present={} activity_enabled={} activity_artifacts={} activity_capture_interval={}s activity_max_frame_gap={}s context_blocks={} summary_max_chars={} daily_report_enabled={} daily_grace_minutes={} archive_recipient_present={} archive_plaintext_days={} archive_upload_configured={} paste_upload_configured={}",
             if self.fal_language.trim().is_empty() {
                 "auto".to_string()
             } else {
                 self.fal_language.clone()
             },
-            self.fal_keyterms.len(),
             self.output_sample_rate,
             !self.fal_api_key.trim().is_empty(),
             self.grammar_model,

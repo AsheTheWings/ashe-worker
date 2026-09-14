@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 
 /// fal.ai queue gateway; the model id appends as the path.
 const QUEUE_BASE_URL: &str = "https://queue.fal.run";
+/// Speech-to-text engine. Dictation is built around this model's input
+/// and output shape, so it is fixed here rather than configured.
+const STT_MODEL: &str = "fal-ai/elevenlabs/speech-to-text/scribe-v2";
 /// Pause between queue status polls.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Status polls before giving up (~10 minutes, past any dictation length).
@@ -51,12 +54,11 @@ pub async fn transcribe_pcm(
     validate_capture(&pcm, sample_rate)?;
     let seconds = pcm.len() as f64 / f64::from(sample_rate) / 2.0;
     logger::info(format!(
-        "fal transcription model={} sample_rate={} bytes={} seconds={:.1} keyterms={}",
-        config.fal_stt_model,
+        "fal transcription model={} sample_rate={} bytes={} seconds={:.1}",
+        STT_MODEL,
         sample_rate,
         pcm.len(),
         seconds,
-        config.fal_keyterms.len()
     ));
     let started = Instant::now();
     let client = reqwest::Client::builder()
@@ -138,8 +140,8 @@ async fn submit_transcription(
     config: &AppConfig,
     audio_url: String,
 ) -> Result<QueuedRequest> {
-    let url = format!("{QUEUE_BASE_URL}/{}", config.fal_stt_model.trim());
-    let input = scribe_input_owned(audio_url, &config.fal_language, &config.fal_keyterms);
+    let url = format!("{QUEUE_BASE_URL}/{STT_MODEL}");
+    let input = scribe_input_owned(audio_url, &config.fal_language);
     let mut attempt = 1;
     let response = loop {
         match client
@@ -234,13 +236,12 @@ async fn fetch_transcript(
 
 /// Build the Scribe v2 input. Single-speaker dictation wants clean
 /// insertable text, so diarization and audio-event tags stay off.
-/// Keyterms cost ~30% extra, so they are only sent when configured.
 #[cfg(test)]
-pub fn scribe_input(audio_url: &str, language: &str, keyterms: &[String]) -> Value {
-    scribe_input_owned(audio_url.to_string(), language, keyterms)
+pub fn scribe_input(audio_url: &str, language: &str) -> Value {
+    scribe_input_owned(audio_url.to_string(), language)
 }
 
-fn scribe_input_owned(audio_url: String, language: &str, keyterms: &[String]) -> Value {
+fn scribe_input_owned(audio_url: String, language: &str) -> Value {
     let mut input = Map::new();
     input.insert("audio_url".to_string(), Value::String(audio_url));
     input.insert("diarize".to_string(), Value::Bool(false));
@@ -249,17 +250,6 @@ fn scribe_input_owned(audio_url: String, language: &str, keyterms: &[String]) ->
         input.insert(
             "language_code".to_string(),
             Value::String(language.trim().to_string()),
-        );
-    }
-    if !keyterms.is_empty() {
-        input.insert(
-            "keyterms".to_string(),
-            Value::Array(
-                keyterms
-                    .iter()
-                    .map(|keyterm| Value::String(keyterm.clone()))
-                    .collect(),
-            ),
         );
     }
     Value::Object(input)
@@ -396,23 +386,17 @@ mod tests {
 
     #[test]
     fn scribe_input_stays_plain_text_by_default() {
-        let input = scribe_input("https://example.com/a.wav", "", &[]);
+        let input = scribe_input("https://example.com/a.wav", "");
         assert_eq!(input["audio_url"], json!("https://example.com/a.wav"));
         assert_eq!(input["diarize"], json!(false));
         assert_eq!(input["tag_audio_events"], json!(false));
         assert!(input.get("language_code").is_none());
-        assert!(input.get("keyterms").is_none());
     }
 
     #[test]
-    fn scribe_input_passes_language_and_keyterms() {
-        let input = scribe_input(
-            "https://example.com/a.wav",
-            "eng",
-            &["Ashe".to_string(), "fal".to_string()],
-        );
+    fn scribe_input_passes_language() {
+        let input = scribe_input("https://example.com/a.wav", "eng");
         assert_eq!(input["language_code"], json!("eng"));
-        assert_eq!(input["keyterms"], json!(["Ashe", "fal"]));
     }
 
     #[test]
