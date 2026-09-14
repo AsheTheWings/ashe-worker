@@ -13,6 +13,7 @@ mod paste_upload;
 mod pill_renderer;
 mod screen_capture;
 mod spectrum;
+mod spoken_punctuation;
 mod ui_app;
 mod util;
 mod win32_service;

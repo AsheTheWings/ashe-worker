@@ -65,6 +65,12 @@ pasted content using word timestamps. The result is inserted once into the
 application where dictation started, with no LLM polishing. While fal.ai is
 working, the pill shows `processing...`. Dictation requires `FAL_KEY`.
 
+Spoken punctuation is converted automatically: say `comma`, `period`,
+`question mark`, `exclamation mark`, `colon`, `semicolon`, `double quote`,
+`single quote`, `new line`, or `new paragraph` and the symbol is inserted
+while the command words are dropped. Say `literal` before a command to keep
+the words instead. Set `ASHE_SPOKEN_PUNCTUATION=0` to disable.
+
 ## Activity records
 
 When enabled, activity tracking periodically observes the configured display and produces local

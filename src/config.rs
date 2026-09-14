@@ -27,6 +27,7 @@ pub struct AppConfig {
     pub fal_stt_model: String,
     pub fal_language: String,
     pub fal_keyterms: Vec<String>,
+    pub spoken_punctuation: bool,
     pub output_sample_rate: u32,
     pub tera_api_key: String,
     pub tera_api_base: String,
@@ -85,6 +86,7 @@ impl AppConfig {
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
                 .collect(),
+            spoken_punctuation: read_bool("ASHE_SPOKEN_PUNCTUATION", true),
             output_sample_rate: read_output_sample_rate(),
             tera_api_key: std::env::var("TERA_API_KEY").unwrap_or_default(),
             tera_api_base: std::env::var("TERA_API_BASE")

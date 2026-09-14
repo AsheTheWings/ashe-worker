@@ -73,7 +73,16 @@ pub async fn transcribe_pcm(
     let submitted = Instant::now();
     wait_completed(&client, &config.fal_api_key, &queued).await?;
     let completed = Instant::now();
-    let transcript = fetch_transcript(&client, &config.fal_api_key, &queued).await?;
+    let fetched = fetch_transcript(&client, &config.fal_api_key, &queued).await?;
+    // Verbalized punctuation ("comma", "double quote") arrives as literal
+    // words: the transcription model has no dictation-command layer, so the
+    // conversion runs here, on the timed word stream the composition
+    // mapping aligns on.
+    let transcript = if config.spoken_punctuation {
+        crate::spoken_punctuation::apply_spoken_punctuation(&fetched)
+    } else {
+        fetched
+    };
     let finished = Instant::now();
     logger::info(format!(
         "fal transcript chars={} encode_ms={} submit_ms={} queue_ms={} result_ms={} total_ms={}",
