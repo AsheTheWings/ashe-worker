@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "project": "ashe-worker",
   "repository": "AsheTheWings/ashe-worker",
   "primaryBranch": "dev",

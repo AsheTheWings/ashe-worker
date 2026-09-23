@@ -36,6 +36,7 @@ const TOGGLE_HOTKEY_ID: i32 = 1001;
 const FIX_GRAMMAR_HOTKEY_ID: i32 = 1006;
 const ANSWER_QUESTION_HOTKEY_ID: i32 = 1007;
 const PASTE_IMAGE_HOTKEY_ID: i32 = 1008;
+const VOICE_HOTKEY_ID: i32 = 1009;
 const TIMER_SERVICE: usize = 2001;
 const TIMER_INTERVAL_MS: u32 = 16;
 const CURSOR_OVERLAY_GAP: i32 = 8;
@@ -67,6 +68,7 @@ pub enum Win32Event {
     FixGrammarRequested { target_hwnd: isize, x: i32, y: i32 },
     AnswerQuestionRequested { target_hwnd: isize, x: i32, y: i32 },
     PasteImageRequested { target_hwnd: isize },
+    ToggleVoiceRequested,
     PositionChanged { x: i32, y: i32 },
     ReloadConfigRequested,
     OpenLogRequested,
@@ -308,6 +310,12 @@ unsafe extern "system" fn window_proc(
                 }
                 return LRESULT(0);
             }
+            VOICE_HOTKEY_ID => {
+                if let Some(state) = state {
+                    let _ = state.event_tx.send(Win32Event::ToggleVoiceRequested);
+                }
+                return LRESULT(0);
+            }
             _ => {}
         },
         WM_TIMER => {
@@ -404,6 +412,7 @@ unsafe extern "system" fn window_proc(
             let _ = UnregisterHotKey(Some(hwnd), FIX_GRAMMAR_HOTKEY_ID);
             let _ = UnregisterHotKey(Some(hwnd), ANSWER_QUESTION_HOTKEY_ID);
             let _ = UnregisterHotKey(Some(hwnd), PASTE_IMAGE_HOTKEY_ID);
+            let _ = UnregisterHotKey(Some(hwnd), VOICE_HOTKEY_ID);
             if !state_ptr.is_null() {
                 let _ = Box::from_raw(state_ptr);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1104,6 +1113,14 @@ unsafe fn register_hotkey(hwnd: HWND) {
         ));
     } else {
         logger::info("Clipboard image hotkey registered as Ctrl+Alt+V");
+    }
+    if let Err(error) = RegisterHotKey(
+        Some(hwnd),
+        VOICE_HOTKEY_ID,
+        MOD_WIN | MOD_SHIFT | MOD_NOREPEAT,
+        'A' as u32,
+    ) {
+        logger::info(format!("RegisterHotKey (voice Win+Shift+A) failed: {error:#}"));
     }
 }
 

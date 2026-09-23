@@ -58,6 +58,7 @@ pub struct AppConfig {
     pub worker_base_url: String,
     pub archive_upload_token: String,
     pub paste_upload_token: String,
+    pub assistant_token: String,
 }
 
 impl AppConfig {
@@ -146,6 +147,8 @@ impl AppConfig {
             worker_base_url: std::env::var("ASHE_WORKER_BASE_URL").unwrap_or_default(),
             archive_upload_token: std::env::var("ASHE_ARCHIVE_UPLOAD_TOKEN").unwrap_or_default(),
             paste_upload_token: std::env::var("ASHE_PASTE_UPLOAD_TOKEN").unwrap_or_default(),
+            assistant_token: std::env::var("ASHE_ASSISTANT_CLIENT_TOKEN")
+                .unwrap_or_default().trim().to_string(),
         }
     }
 
@@ -199,9 +202,17 @@ impl AppConfig {
         Ok(())
     }
 
+    pub fn validate_for_voice(&self) -> Result<()> {
+        self.worker_endpoint("/v1/assistant/sessions")?;
+        if self.assistant_token.len() < 32 {
+            return Err(anyhow!("ASHE_ASSISTANT_CLIENT_TOKEN must contain at least 32 characters"));
+        }
+        Ok(())
+    }
+
     pub fn log_summary(&self) -> String {
         format!(
-            "language={} output_sample_rate={} grammar_model={} question_model={} journal_model={} tera_api_key_present={} reasoning_effort_present={} activity_enabled={} activity_artifacts={} activity_capture_interval={}s activity_max_frame_gap={}s context_blocks={} summary_max_chars={} daily_report_enabled={} daily_grace_minutes={} archive_recipient_present={} archive_plaintext_days={} archive_upload_configured={} paste_upload_configured={}",
+            "language={} output_sample_rate={} grammar_model={} question_model={} journal_model={} tera_api_key_present={} reasoning_effort_present={} activity_enabled={} activity_artifacts={} activity_capture_interval={}s activity_max_frame_gap={}s context_blocks={} summary_max_chars={} daily_report_enabled={} daily_grace_minutes={} archive_recipient_present={} archive_plaintext_days={} archive_upload_configured={} paste_upload_configured={} assistant_configured={}",
             if self.stt_language.trim().is_empty() {
                 "auto".to_string()
             } else {
@@ -225,6 +236,7 @@ impl AppConfig {
             self.archive_plaintext_days,
             !self.worker_base_url.trim().is_empty() && !self.archive_upload_token.trim().is_empty(),
             !self.worker_base_url.trim().is_empty() && !self.paste_upload_token.trim().is_empty(),
+            !self.worker_base_url.trim().is_empty() && self.assistant_token.len() >= 32,
         )
     }
 }

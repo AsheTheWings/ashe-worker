@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+async-trait = "0.1.89"
 ashe-archive-crypto = { package = "ashe-archive", path = "archive-crypto" }
 base64 = "0.21.7"
+bytes = "1.12.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
 cpal = "0.17.3"
 crossbeam-channel = "0.5.15"
@@ -16,6 +18,9 @@ futures = "0.3.32"
 fs2 = "0.4.3"
 iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio"] }
 image = { version = "=0.25.10", default-features = false, features = ["png", "webp"] }
+opus = "0.4.0"
+rand = "0.10.1"
+rtc = "0.21.0"
 rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rpassword = "7.5.4"
@@ -28,6 +33,7 @@ tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 urlencoding = "2.1.3"
+webrtc = "0.21.0"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_HiDpi", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_Media_Audio", "Win32_Media_Multimedia", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"] }
 zeroize = "1.8.2"
 

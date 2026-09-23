@@ -11,6 +11,7 @@ use crate::paste_upload::PasteUploader;
 use crate::pill_renderer;
 use crate::spectrum::{SpectrumAnalyzer, pcm_chunk_to_mono};
 use crate::win32_service::{self, Win32Command, Win32Event};
+use crate::voice::{VoiceEvent, VoiceHandle};
 use crossbeam_channel::{Receiver, Sender};
 use iced::{Element, Point, Subscription, Task, window};
 use std::thread::JoinHandle;
@@ -78,6 +79,8 @@ pub struct UiApp {
     last_activity_status: String,
     paste_in_flight: bool,
     paste_uploader: PasteUploader,
+    voice: Option<VoiceHandle>,
+    voice_stopping: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +137,8 @@ impl UiApp {
             last_activity_status: String::new(),
             paste_in_flight: false,
             paste_uploader: PasteUploader::default(),
+            voice: None,
+            voice_stopping: false,
         };
         app.send_win32(Win32Command::SetTooltip(
             "Ashe Worker - Idle - Win+Shift+H".to_string(),
@@ -205,6 +210,7 @@ impl UiApp {
         while let Ok(event) = self.win32_rx.try_recv() {
             tasks.push(self.handle_win32_event(event));
         }
+        self.pump_voice();
         if self.pump_audio_capture() {
             logger::info("Dictation memory safety threshold reached; finalizing session");
             tasks.push(self.request_stop());
@@ -312,6 +318,10 @@ impl UiApp {
                 Point::new(x as f32, y as f32),
             ),
             Win32Event::PasteImageRequested { target_hwnd } => self.begin_image_paste(target_hwnd),
+            Win32Event::ToggleVoiceRequested => {
+                self.toggle_voice();
+                Task::none()
+            }
             Win32Event::PositionChanged { x, y } => {
                 self.target_position = Some(Point::new(x as f32, y as f32));
                 Task::none()
@@ -373,6 +383,10 @@ impl UiApp {
     }
 
     fn toggle(&mut self, target_hwnd: isize, position: Point) -> Task<Message> {
+        if self.voice.is_some() {
+            logger::info("Dictation unavailable during voice call");
+            return Task::none();
+        }
         match self.state {
             DictationState::Idle => self.start(target_hwnd, position),
             DictationState::Starting | DictationState::Listening | DictationState::Typing => {
@@ -389,6 +403,65 @@ impl UiApp {
             DictationState::FixingGrammar | DictationState::AnsweringQuestion => {
                 logger::info("Text action already in progress");
                 Task::none()
+            }
+        }
+    }
+
+    fn toggle_voice(&mut self) {
+        if let Some(voice) = &self.voice {
+            if !self.voice_stopping {
+                self.voice_stopping = true;
+                voice.stop();
+                self.send_win32(Win32Command::SetTooltip(
+                    "Ashe Worker - Voice stopping - Win+Shift+A".to_string(),
+                ));
+            }
+            return;
+        }
+        if self.state != DictationState::Idle {
+            logger::info("Voice unavailable during dictation or text action");
+            return;
+        }
+        match VoiceHandle::start(self.config.clone()) {
+            Ok(voice) => {
+                self.voice = Some(voice);
+                self.voice_stopping = false;
+                self.send_win32(Win32Command::SetTooltip(
+                    "Ashe Worker - Voice connecting - Win+Shift+A".to_string(),
+                ));
+            }
+            Err(error) => {
+                logger::info(format!("Voice could not start: {error:#}"));
+                self.send_win32(Win32Command::SetTooltip(
+                    "Ashe Worker - Voice configuration error - Win+Shift+A".to_string(),
+                ));
+            }
+        }
+    }
+
+    fn pump_voice(&mut self) {
+        while let Some(event) = self.voice.as_ref().and_then(VoiceHandle::next_event) {
+            match event {
+                VoiceEvent::Connected => {
+                    logger::info("Ashe voice connected");
+                    self.send_win32(Win32Command::SetTooltip(
+                        "Ashe Worker - Voice active - Win+Shift+A to stop".to_string(),
+                    ));
+                }
+                VoiceEvent::Error(error) => {
+                    logger::info(format!("Ashe voice failed: {error}"));
+                    self.send_win32(Win32Command::SetTooltip(
+                        "Ashe Worker - Voice error - Win+Shift+A".to_string(),
+                    ));
+                }
+                VoiceEvent::Stopped => {
+                    if let Some(mut voice) = self.voice.take() { voice.finish(); }
+                    self.voice_stopping = false;
+                    self.send_win32(Win32Command::SetTooltip(
+                        "Ashe Worker - Voice stopped - Win+Shift+A".to_string(),
+                    ));
+                    break;
+                }
             }
         }
     }
@@ -784,10 +857,10 @@ impl UiApp {
     }
 
     fn reload_config(&mut self) {
-        if self.state != DictationState::Idle {
+        if self.state != DictationState::Idle || self.voice.is_some() {
             self.send_win32(Win32Command::ShowMessageBox {
                 title: "Ashe Worker".to_string(),
-                text: "Stop dictation before reloading config.".to_string(),
+                text: "Stop dictation or voice before reloading config.".to_string(),
             });
             return;
         }
@@ -804,7 +877,7 @@ impl UiApp {
         self.send_win32(Win32Command::ShowMessageBox {
             title: "About Ashe Worker".to_string(),
             text: format!(
-                "Ashe Worker\r\nVersion: {}\r\nBuild: {}\r\n\r\nDictate: Win+Shift+H\r\nGrammar: Win+Shift+G\r\nQuestion: Win+Shift+Q\r\nImage path: Ctrl+Alt+V\r\nActivity tracking: {}\r\nArtifacts: {}\r\nConfig: {}\r\nLog: {}",
+                "Ashe Worker\r\nVersion: {}\r\nBuild: {}\r\n\r\nDictate: Win+Shift+H\r\nVoice: Win+Shift+A\r\nGrammar: Win+Shift+G\r\nQuestion: Win+Shift+Q\r\nImage path: Ctrl+Alt+V\r\nActivity tracking: {}\r\nArtifacts: {}\r\nConfig: {}\r\nLog: {}",
                 APP_VERSION,
                 BUILD_ID,
                 self.activity.status().summary,
@@ -1009,6 +1082,10 @@ impl UiApp {
 
     fn quit(&mut self) -> Task<Message> {
         logger::info("Quit requested");
+        if let Some(mut voice) = self.voice.take() {
+            voice.stop();
+            voice.finish();
+        }
         self.activity.shutdown();
         if let Some(mut audio) = self.audio.take() {
             audio.stop();

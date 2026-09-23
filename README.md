@@ -17,6 +17,7 @@ and older records can be placed in encrypted archives for retention or backup.
 - Exclude configured applications from activity capture.
 - Encrypt older records and optionally upload the encrypted archives.
 - Upload a clipboard image and paste its remote path into the active application.
+- Talk with Ashe Assistant through a background voice call.
 
 ## Getting started
 
@@ -35,6 +36,7 @@ collection. Right-click it to control features, reload configuration, open logs,
 | Hotkey | Action |
 | --- | --- |
 | `Win+Shift+H` | Start or stop dictation |
+| `Win+Shift+A` | Start or stop the background Ashe voice call |
 | `Win+Shift+G` | Correct selected text |
 | `Win+Shift+Q` | Ask a question using selected text |
 | `Ctrl+Alt+V` | Upload a clipboard image and paste its remote path |
@@ -76,6 +78,22 @@ Spoken punctuation is converted automatically: say `comma`, `period`,
 `single quote`, `new line`, or `new paragraph` and the symbol is inserted
 while the command words are dropped. Say `literal` before a command to keep
 the words instead. Set `ASHE_SPOKEN_PUNCTUATION=0` to disable.
+
+## Voice assistant
+
+`Win+Shift+A` starts or stops a background, audio-only WebRTC call using the
+default Windows microphone and speaker. No browser or separate voice window is
+opened. The app sends only the WebRTC offer and the dedicated
+`ASHE_ASSISTANT_CLIENT_TOKEN` to the authenticated Ashe Worker Server route;
+the server forwards signaling to Ashe Assistant. Media flows directly over the
+WebRTC connection. ChatGPT credentials and agent sessions remain on the Linux
+service. Dictation and voice cannot run together.
+
+Voice playback is not echo-cancelled in this version; use a headset to keep
+speaker output from feeding back into the microphone. On stop or exit, Ashe
+Worker closes its peer connection and requests server-side session teardown.
+If another voice session is already active, a new call is refused rather than
+disconnecting it.
 
 ## Activity records
 

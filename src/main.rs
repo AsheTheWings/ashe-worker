@@ -16,6 +16,8 @@ mod spoken_punctuation;
 mod stt;
 mod ui_app;
 mod util;
+mod voice;
+mod voice_audio;
 mod win32_service;
 
 use anyhow::Result;

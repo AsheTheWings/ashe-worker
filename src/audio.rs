@@ -2,7 +2,21 @@ use crate::logger;
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
+
+enum AudioSink {
+    Unbounded(UnboundedSender<Vec<u8>>),
+    Bounded(Sender<Vec<u8>>),
+}
+
+impl AudioSink {
+    fn send(&self, chunk: Vec<u8>) {
+        match self {
+            Self::Unbounded(sender) => { let _ = sender.send(chunk); }
+            Self::Bounded(sender) => { let _ = sender.try_send(chunk); }
+        }
+    }
+}
 
 pub struct AudioCapture {
     stream: Option<Stream>,
@@ -12,6 +26,14 @@ pub struct AudioCapture {
 
 impl AudioCapture {
     pub fn start(sender: UnboundedSender<Vec<u8>>, output_sample_rate: u32) -> Result<Self> {
+        Self::start_inner(AudioSink::Unbounded(sender), output_sample_rate)
+    }
+
+    pub fn start_bounded(sender: Sender<Vec<u8>>, output_sample_rate: u32) -> Result<Self> {
+        Self::start_inner(AudioSink::Bounded(sender), output_sample_rate)
+    }
+
+    fn start_inner(sender: AudioSink, output_sample_rate: u32) -> Result<Self> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -128,17 +150,17 @@ impl AudioConverter {
         }
     }
 
-    fn send_f32(&mut self, data: &[f32], sender: &UnboundedSender<Vec<u8>>) {
+    fn send_f32(&mut self, data: &[f32], sender: &AudioSink) {
         let mono = self.mix_to_mono(data.iter().copied());
         self.send_mono(mono, sender);
     }
 
-    fn send_i16(&mut self, data: &[i16], sender: &UnboundedSender<Vec<u8>>) {
+    fn send_i16(&mut self, data: &[i16], sender: &AudioSink) {
         let mono = self.mix_to_mono(data.iter().map(|sample| *sample as f32 / 32768.0));
         self.send_mono(mono, sender);
     }
 
-    fn send_u16(&mut self, data: &[u16], sender: &UnboundedSender<Vec<u8>>) {
+    fn send_u16(&mut self, data: &[u16], sender: &AudioSink) {
         let mono = self.mix_to_mono(
             data.iter()
                 .map(|sample| (*sample as f32 - 32768.0) / 32768.0),
@@ -162,7 +184,7 @@ impl AudioConverter {
         mono
     }
 
-    fn send_mono(&mut self, mono: Vec<f32>, sender: &UnboundedSender<Vec<u8>>) {
+    fn send_mono(&mut self, mono: Vec<f32>, sender: &AudioSink) {
         if mono.is_empty() {
             return;
         }
@@ -178,7 +200,7 @@ impl AudioConverter {
             chunk.extend_from_slice(&sample.to_le_bytes());
         }
         if !chunk.is_empty() {
-            let _ = sender.send(chunk);
+            sender.send(chunk);
         }
     }
 
