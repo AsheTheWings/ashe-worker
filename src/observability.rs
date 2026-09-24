@@ -37,6 +37,7 @@ impl Telemetry {
                 KeyValue::new("service.namespace", "ashe"),
                 KeyValue::new("service.name", "ashe-worker"),
                 KeyValue::new("service.version", build_id.to_string()),
+                KeyValue::new("service.instance.id", process_instance_id()),
                 KeyValue::new("deployment.environment.name", environment),
                 KeyValue::new("ashe.worker.app_version", version.to_string()),
             ])
@@ -106,6 +107,44 @@ impl Telemetry {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.traces.is_some() && self.metrics.is_some() && self.logs.is_some()
+    }
+
+    pub fn emit_qualification(&self) {
+        let correlation_id = process_instance_id();
+        if let Some(provider) = &self.traces {
+            let tracer = provider.tracer("ashe-worker");
+            let mut span = tracer.start("ashe.worker.qualification.canary");
+            span.set_attribute(KeyValue::new(
+                "ashe.worker.telemetry.correlation_id",
+                correlation_id.clone(),
+            ));
+            span.set_attribute(KeyValue::new(
+                "ashe.worker.lifecycle.phase",
+                "qualification",
+            ));
+            span.end();
+        }
+        if let Some(provider) = &self.metrics {
+            provider
+                .meter("ashe-worker")
+                .u64_counter("ashe.worker.qualification.canary.count")
+                .build()
+                .add(1, &[]);
+        }
+        if let Some(provider) = &self.logs {
+            let logger = provider.logger("ashe-worker");
+            let mut record = logger.create_log_record();
+            record.set_event_name("ashe.worker.qualification.canary");
+            record.set_severity_number(Severity::Info);
+            record.set_body(AnyValue::String("ashe.worker.qualification.canary".into()));
+            record.add_attribute("ashe.worker.telemetry.correlation_id", correlation_id);
+            record.add_attribute("ashe.worker.lifecycle.phase", "qualification");
+            logger.emit(record);
+        }
+    }
+
     pub fn shutdown(self) {
         if let Some(provider) = self.traces {
             let _ = provider.shutdown();
@@ -117,4 +156,8 @@ impl Telemetry {
             let _ = provider.shutdown();
         }
     }
+}
+
+fn process_instance_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
 }

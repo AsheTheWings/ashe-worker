@@ -6,6 +6,7 @@ mod composition;
 mod injector;
 mod llm_client;
 mod native_overlay;
+mod observability;
 mod overlay_text;
 mod overlay_view;
 mod paste_upload;
@@ -14,7 +15,6 @@ mod screen_capture;
 mod spectrum;
 mod spoken_punctuation;
 mod stt;
-mod observability;
 mod ui_app;
 mod util;
 mod voice;
@@ -36,6 +36,16 @@ fn main() -> ExitCode {
     logger::init();
     config::load_env_file_near_exe();
     let telemetry = observability::Telemetry::initialize(APP_VERSION, BUILD_ID);
+    if std::env::args().any(|argument| argument == "--qualify-observability") {
+        if !telemetry.is_enabled() {
+            logger::info("OpenTelemetry qualification failed: exporter is unavailable");
+            telemetry.shutdown();
+            return ExitCode::FAILURE;
+        }
+        telemetry.emit_qualification();
+        telemetry.shutdown();
+        return ExitCode::SUCCESS;
+    }
     install_panic_logger();
     let result = match run() {
         Ok(()) => {

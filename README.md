@@ -136,6 +136,10 @@ described in [.env.example](.env.example):
 The helper validates the runtime `.env.local` already present in `ASHE_RELEASE_DIR`; it does not
 copy the project `.env.local` or secrets into the release directory.
 
+After installing a release, run `ashe-worker.exe --qualify-observability`
+once to emit the bounded production trace, metric, and LogRecord canary before
+starting the normal background process.
+
 ## Troubleshooting
 
 Open the local log from the tray menu when a hotkey, microphone, network request, activity report,
