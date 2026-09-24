@@ -339,7 +339,7 @@ fn read_f32(name: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-fn load_env_file_near_exe() {
+pub fn load_env_file_near_exe() {
     let mut path = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf));

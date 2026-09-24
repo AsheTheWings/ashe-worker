@@ -1,0 +1,26 @@
+{
+  "schema_version": "opentelemetry.producer/signal-catalog/v1",
+  "resource_schema": "opentelemetry-resource/v1",
+  "signal_schema": "ashe-worker-signals/v1",
+  "service_namespace": "ashe",
+  "service_names": ["ashe-worker"],
+  "catalog": {
+    "traces": ["ashe.worker.lifecycle.start", "ashe.worker.qualification.canary"],
+    "trace_name_patterns": [],
+    "span_events": [],
+    "metrics": ["ashe.worker.lifecycle.count", "ashe.worker.qualification.canary.count"],
+    "logs": ["ashe.worker.service.started", "ashe.worker.qualification.canary"],
+    "correlation_attributes": ["ashe.worker.telemetry.correlation_id"]
+  },
+  "allowed_attributes": {
+    "traces": ["ashe.worker.lifecycle.phase", "ashe.worker.telemetry.correlation_id"],
+    "metrics": ["ashe.worker.lifecycle.phase"],
+    "logs": ["ashe.worker.lifecycle.phase", "ashe.worker.telemetry.correlation_id", "event.name"]
+  },
+  "metric_dimensions": {"ashe.worker.lifecycle.phase": ["start", "stop", "qualification"]},
+  "metric_contract": {
+    "ashe.worker.lifecycle.count": {"instrument": "counter", "unit": "1"},
+    "ashe.worker.qualification.canary.count": {"instrument": "counter", "unit": "1"}
+  },
+  "error_classes": []
+}

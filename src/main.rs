@@ -14,6 +14,7 @@ mod screen_capture;
 mod spectrum;
 mod spoken_punctuation;
 mod stt;
+mod observability;
 mod ui_app;
 mod util;
 mod voice;
@@ -33,8 +34,10 @@ const BUILD_ID: &str = env!("ASHE_BUILD_ID");
 
 fn main() -> ExitCode {
     logger::init();
+    config::load_env_file_near_exe();
+    let telemetry = observability::Telemetry::initialize(APP_VERSION, BUILD_ID);
     install_panic_logger();
-    match run() {
+    let result = match run() {
         Ok(()) => {
             logger::info("Ashe Worker runtime exited cleanly");
             ExitCode::SUCCESS
@@ -43,7 +46,9 @@ fn main() -> ExitCode {
             logger::info(format!("Ashe Worker runtime failed: {error:#}"));
             ExitCode::FAILURE
         }
-    }
+    };
+    telemetry.shutdown();
+    result
 }
 
 fn run() -> Result<()> {
