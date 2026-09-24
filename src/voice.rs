@@ -1,6 +1,7 @@
 use crate::audio::AudioCapture;
 use crate::config::AppConfig;
 use crate::logger;
+use crate::observability;
 use crate::voice_audio::{AudioPlayback, PlaybackSink};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -138,6 +139,8 @@ async fn run_voice(
     mut stop: watch::Receiver<bool>,
     events: Sender<VoiceEvent>,
 ) -> Result<()> {
+    let telemetry = observability::VoiceSessionTelemetry::start();
+    telemetry.phase("starting");
     let (playback, sink) = AudioPlayback::start()?;
     let _playback = playback;
     let (gather_tx, mut gather_rx) = mpsc::unbounded_channel();
@@ -206,7 +209,9 @@ async fn run_voice(
             .ok_or_else(|| anyhow!("voice offer has no local description"))?.sdp;
         // Keep signaling alive until we know whether a server session exists.
         // Cancelling on stop could strand a session we cannot name.
-        let answer = create_session(&client, &config, &sdp).await?;
+        telemetry.phase("signaling_started");
+        let answer = create_session(&client, &config, &sdp, &telemetry).await?;
+        telemetry.phase("signaling_completed");
         active_session = Some(answer.session_id);
         if *stop.borrow() { return Ok(()); }
         peer.set_remote_description(RTCSessionDescription::answer(answer.answer_sdp)?)
@@ -226,6 +231,7 @@ async fn run_voice(
             }
         }).await.context("voice connection timed out")??;
         if !connected { return Ok(()); }
+        telemetry.phase("peer_connected");
         let _ = events.send(VoiceEvent::Connected);
 
         let payload_type = sender.get_parameters().await?.rtp_parameters.codecs.first()
@@ -234,21 +240,53 @@ async fn run_voice(
             .ok_or_else(|| anyhow!("voice sender has no SSRC"))?;
         let (pcm_tx, pcm_rx) = mpsc::channel(12);
         let mut capture = AudioCapture::start_bounded(pcm_tx, AUDIO_RATE)?;
+        telemetry.phase("capture_started");
         let outcome = send_audio(track, ssrc, payload_type, pcm_rx, &mut stop, &mut state_rx).await;
         capture.stop();
+        telemetry.phase("capture_stopped");
         outcome
     }.await;
 
     let _ = peer.close().await;
     if let Some(session) = active_session {
         let endpoint = config.worker_endpoint(&format!("/v1/assistant/sessions/{session}"))?;
-        let _ = client
+        let dependency = telemetry.dependency("DELETE", "/v1/assistant/sessions/{session_id}");
+        let mut headers = reqwest::header::HeaderMap::new();
+        dependency.inject(&mut headers);
+        let response = client
             .delete(endpoint)
+            .headers(headers)
             .bearer_auth(&config.assistant_token)
             .timeout(Duration::from_secs(5))
             .send()
             .await;
+        match response {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                dependency.finish(
+                    Some(status),
+                    if status >= 500 {
+                        "error"
+                    } else if status >= 400 {
+                        "rejected"
+                    } else {
+                        "success"
+                    },
+                    (status >= 500).then_some("dependency"),
+                );
+            }
+            Err(_) => dependency.finish(None, "error", Some("dependency")),
+        }
     }
+    telemetry.phase("stopped");
+    telemetry.finish(
+        result.is_ok(),
+        if result.is_ok() {
+            "client_stopped"
+        } else {
+            "operational_error"
+        },
+    );
     result
 }
 
@@ -256,32 +294,53 @@ async fn create_session(
     client: &reqwest::Client,
     config: &AppConfig,
     sdp: &str,
+    telemetry: &observability::VoiceSessionTelemetry,
 ) -> Result<SessionAnswer> {
     let endpoint = config.worker_endpoint("/v1/assistant/sessions")?;
-    let response = client
-        .post(&endpoint)
-        .bearer_auth(&config.assistant_token)
-        .json(&serde_json::json!({ "sdp": sdp }))
-        .send()
-        .await
-        .context("assistant signaling failed")?;
-    if response.status() == reqwest::StatusCode::CONFLICT {
-        return Err(anyhow!("assistant already has an active voice session"));
+    let dependency = telemetry.dependency("POST", "/v1/assistant/sessions");
+    let mut headers = reqwest::header::HeaderMap::new();
+    dependency.inject(&mut headers);
+    let mut status_code = None;
+    let result = async {
+        let response = client
+            .post(&endpoint)
+            .headers(headers)
+            .bearer_auth(&config.assistant_token)
+            .json(&serde_json::json!({ "sdp": sdp }))
+            .send()
+            .await
+            .context("assistant signaling failed")?;
+        status_code = Some(response.status().as_u16());
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Err(anyhow!("assistant already has an active voice session"));
+        }
+        if response.status() != reqwest::StatusCode::CREATED {
+            return Err(anyhow!(
+                "assistant signaling returned HTTP {}",
+                response.status()
+            ));
+        }
+        let answer: SessionAnswer = response
+            .json()
+            .await
+            .context("assistant signaling returned invalid answer")?;
+        if !valid_session_id(&answer.session_id) {
+            return Err(anyhow!("assistant returned an invalid session identifier"));
+        }
+        Ok(answer)
     }
-    if response.status() != reqwest::StatusCode::CREATED {
-        return Err(anyhow!(
-            "assistant signaling returned HTTP {}",
-            response.status()
-        ));
-    }
-    let answer: SessionAnswer = response
-        .json()
-        .await
-        .context("assistant signaling returned invalid answer")?;
-    if !valid_session_id(&answer.session_id) {
-        return Err(anyhow!("assistant returned an invalid session identifier"));
-    }
-    Ok(answer)
+    .await;
+    let outcome = match (result.is_ok(), status_code) {
+        (true, _) => "success",
+        (false, Some(status)) if status < 500 => "rejected",
+        _ => "error",
+    };
+    dependency.finish(
+        status_code,
+        outcome,
+        (outcome == "error").then_some("dependency"),
+    );
+    result
 }
 
 fn valid_session_id(id: &str) -> bool {

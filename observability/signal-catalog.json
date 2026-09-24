@@ -5,15 +5,15 @@
   "service_namespace": "ashe",
   "service_names": ["ashe-worker"],
   "catalog": {
-    "traces": ["ashe.worker.lifecycle.start", "ashe.worker.qualification.canary"],
+    "traces": ["ashe.worker.assistant.request", "ashe.worker.lifecycle.start", "ashe.worker.qualification.canary", "ashe.worker.voice.session"],
     "trace_name_patterns": [],
-    "span_events": [],
+    "span_events": ["ashe.worker.voice.phase"],
     "metrics": ["ashe.worker.lifecycle.count", "ashe.worker.qualification.canary.count"],
     "logs": ["ashe.worker.operation", "ashe.worker.service.started", "ashe.worker.qualification.canary"],
     "correlation_attributes": ["ashe.worker.telemetry.correlation_id"]
   },
   "allowed_attributes": {
-    "traces": ["ashe.worker.lifecycle.phase", "ashe.worker.telemetry.correlation_id"],
+    "traces": ["ashe.worker.lifecycle.phase", "ashe.worker.operation", "ashe.worker.outcome", "ashe.worker.telemetry.correlation_id", "ashe.worker.voice.close_reason", "ashe.worker.voice.phase", "error.type", "http.request.method", "http.response.status_code", "http.route"],
     "metrics": ["ashe.worker.lifecycle.phase"],
     "logs": ["ashe.worker.lifecycle.phase", "ashe.worker.operation", "ashe.worker.outcome", "ashe.worker.telemetry.correlation_id", "error.type", "event.name"]
   },
@@ -22,5 +22,5 @@
     "ashe.worker.lifecycle.count": {"instrument": "counter", "unit": "1"},
     "ashe.worker.qualification.canary.count": {"instrument": "counter", "unit": "1"}
   },
-  "error_classes": ["operational"]
+  "error_classes": ["dependency", "operational"]
 }

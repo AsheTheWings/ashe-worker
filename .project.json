@@ -22,12 +22,12 @@
         }
       },
       "project": {
-        "sourceCommit": "4158ddab0a782892a3dfa970e5e9d682bcd51d64",
-        "bundleSha256": "88f1aaca5111211a9ad38f1048ace4bf2b47ff78bc682db5d9e6ed4c954fb681",
+        "sourceCommit": "46c0069bb6f60ffc2c357378ce3cf978ed236529",
+        "bundleSha256": "de39de787f2c4cec13d50726f3187266ccfc16d4cbd2ecf822a61b9d77a00a71",
         "files": {
           "rules/observability.ashe-worker.md": {
             "sourcePath": "projections/projects/ashe-worker/rules/observability.ashe-worker.md",
-            "sha256": "fc68991f129fd4e801c1e0ff4e94522f872993f69fbfbb6cfe89f855b6c32f52"
+            "sha256": "66e9ae8e5bcbfe5d3c4be28edf3f8a403fa570613b2498f711bcbd66b1b1529c"
           }
         }
       }
