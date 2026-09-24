@@ -93,6 +93,7 @@ impl Telemetry {
                 .add(1, &[KeyValue::new("ashe.worker.lifecycle.phase", "start")]);
         }
         if let Some(provider) = &logs {
+            crate::logger::install(provider.clone());
             let logger = provider.logger("ashe-worker");
             let mut record = logger.create_log_record();
             record.set_event_name("ashe.worker.service.started");

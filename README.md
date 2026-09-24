@@ -29,7 +29,7 @@ and older records can be placed in encrypted archives for retention or backup.
 4. Launch `ashe-worker.exe`.
 
 The app starts in the Windows system tray. Left-click the tray icon to open the artifact
-collection. Right-click it to control features, reload configuration, open logs, or quit.
+collection. Right-click it to control features, reload configuration, or quit.
 
 ## Hotkeys
 
@@ -142,5 +142,6 @@ starting the normal background process.
 
 ## Troubleshooting
 
-Open the local log from the tray menu when a hotkey, microphone, network request, activity report,
-or archive operation fails.
+Operational diagnostics are exported only as privacy-bounded OpenTelemetry
+traces, metrics, and LogRecords. Ashe Worker does not create a local diagnostic
+log.

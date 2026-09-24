@@ -33,12 +33,17 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_ID: &str = env!("ASHE_BUILD_ID");
 
 fn main() -> ExitCode {
-    logger::init();
+    logger::remove_legacy_file();
     config::load_env_file_near_exe();
     let telemetry = observability::Telemetry::initialize(APP_VERSION, BUILD_ID);
+    if std::env::var("ASHE_WORKER_ENV").as_deref() == Ok("production")
+        && !telemetry.is_enabled()
+    {
+        telemetry.shutdown();
+        return ExitCode::FAILURE;
+    }
     if std::env::args().any(|argument| argument == "--qualify-observability") {
         if !telemetry.is_enabled() {
-            logger::info("OpenTelemetry qualification failed: exporter is unavailable");
             telemetry.shutdown();
             return ExitCode::FAILURE;
         }
@@ -65,7 +70,6 @@ fn run() -> Result<()> {
     init_process_dpi_awareness();
     init_rustls_crypto_provider();
     logger::info(format!("Build version={APP_VERSION} build_id={BUILD_ID}"));
-    logger::info(format!("Log path: {}", logger::log_path().display()));
     logger::info("Launching Iced UI on main thread");
     iced::application(UiApp::new, UiApp::update, UiApp::view)
         .title(app_title)
@@ -76,10 +80,8 @@ fn run() -> Result<()> {
 }
 
 fn install_panic_logger() {
-    let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         logger::info(format!("Unhandled panic: {panic}"));
-        previous(panic);
     }));
 }
 

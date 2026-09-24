@@ -81,6 +81,7 @@ if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
 fi
 
 cd "$PROJECT_ROOT"
+"$PROJECT_ROOT/scripts/check-observability.sh"
 PACKAGE_VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$PROJECT_ROOT/Cargo.toml")"
 GIT_SHA="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
 if git -C "$PROJECT_ROOT" diff --quiet --ignore-submodules HEAD -- 2>/dev/null; then
@@ -96,6 +97,7 @@ fi
 ASHE_BUILD_ID="$BUILD_ID" ASHE_ARCHIVE_RECIPIENT_FILE="$RECIPIENT_FILE" \
   "$CARGO_BIN" build --release --target "$TARGET"
 mkdir -p "$RELEASE_DIR"
+rm -f "$RELEASE_DIR/ashe-worker.log"
 cp "$PROJECT_ROOT/target/$TARGET/release/$BINARY" "$RELEASE_DIR/$BINARY"
 cp "$PROJECT_ROOT/target/$TARGET/release/$CLI_BINARY" "$RELEASE_DIR/$CLI_BINARY"
 cp "$PROJECT_ROOT/.env.example" "$RELEASE_DIR/.env.example"

@@ -11,23 +11,23 @@
     "source": "AsheTheWings/agentic-development-control",
     "bundles": {
       "canonical": {
-        "sourceCommit": "638c962b956442e12022dc773b8b733e87c7dd2b",
-        "bundleSha256": "de6df8f5d82f26393dafc9514a8af68acd9fa38bae8fbb048520b5f805dca012",
+        "sourceCommit": "43e99d38deccea2e6ef0236ddcda22a793a999c4",
+        "bundleSha256": "a9fb5cc46d75bffd9bcfeb2700609559f7507183651c77f1aaf647d080a50c7a",
         "files": {
           "rules/observability.md": {
             "sourcePath": "project-rules/observability.md",
-            "revision": "opentelemetry-producer/v3",
-            "sha256": "686edf9ee191c2290127321976699eeb53a2f0d5d4d794c25db77fe60fce4487"
+            "revision": "opentelemetry-producer/v4",
+            "sha256": "2a62abcd8846a4f47a09bbbe91ca7188ca2cbe74bd06e397ec6e1df40d0c1741"
           }
         }
       },
       "project": {
-        "sourceCommit": "ba72135a00f34dc959a4fcb5a3941271b52f8b20",
-        "bundleSha256": "09c560b9d84bf55449f16b545c72bf1ee1e0ab0017588e7a14169549c9e96b95",
+        "sourceCommit": "4158ddab0a782892a3dfa970e5e9d682bcd51d64",
+        "bundleSha256": "88f1aaca5111211a9ad38f1048ace4bf2b47ff78bc682db5d9e6ed4c954fb681",
         "files": {
           "rules/observability.ashe-worker.md": {
             "sourcePath": "projections/projects/ashe-worker/rules/observability.ashe-worker.md",
-            "sha256": "6d4e168edcef138810df60be3a4e0cffa8e41819c8686efa9465dd11dc9e0610"
+            "sha256": "fc68991f129fd4e801c1e0ff4e94522f872993f69fbfbb6cfe89f855b6c32f52"
           }
         }
       }

@@ -43,8 +43,6 @@ const CURSOR_OVERLAY_GAP: i32 = 8;
 const WM_TRAY: u32 = WM_APP + 1;
 const MENU_TOGGLE: usize = 3001;
 const MENU_RELOAD_CONFIG: usize = 3002;
-const MENU_OPEN_LOG: usize = 3003;
-const MENU_COPY_LOG_PATH: usize = 3004;
 const MENU_ABOUT: usize = 3005;
 const MENU_QUIT: usize = 3006;
 const MENU_TOGGLE_ACTIVITY: usize = 3007;
@@ -71,8 +69,6 @@ pub enum Win32Event {
     ToggleVoiceRequested,
     PositionChanged { x: i32, y: i32 },
     ReloadConfigRequested,
-    OpenLogRequested,
-    CopyLogPathRequested,
     ToggleActivityRequested,
     OpenArtifactsRequested,
     OpenJournalRequested,
@@ -99,9 +95,7 @@ pub enum Win32Command {
         title: String,
         text: String,
     },
-    OpenLog(String),
     OpenPath(String),
-    CopyText(String),
     PasteText {
         target_hwnd: isize,
         text: String,
@@ -371,14 +365,6 @@ unsafe extern "system" fn window_proc(
                         let _ = state.event_tx.send(Win32Event::ReloadConfigRequested);
                         return LRESULT(0);
                     }
-                    MENU_OPEN_LOG => {
-                        let _ = state.event_tx.send(Win32Event::OpenLogRequested);
-                        return LRESULT(0);
-                    }
-                    MENU_COPY_LOG_PATH => {
-                        let _ = state.event_tx.send(Win32Event::CopyLogPathRequested);
-                        return LRESULT(0);
-                    }
                     MENU_TOGGLE_ACTIVITY => {
                         let _ = state.event_tx.send(Win32Event::ToggleActivityRequested);
                         return LRESULT(0);
@@ -457,16 +443,6 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
                 state.activity_status = status;
             }
             Win32Command::ShowMessageBox { title, text } => message_box(hwnd, &text, &title),
-            Win32Command::OpenLog(path) => {
-                if let Err(err) = Command::new("notepad.exe").arg(path).spawn() {
-                    logger::info(format!("Open log failed: {err:#}"));
-                    message_box(
-                        hwnd,
-                        &format!("Could not open log file: {err}"),
-                        "Ashe Worker",
-                    );
-                }
-            }
             Win32Command::OpenPath(path) => {
                 let mut path = PathBuf::from(&path);
                 while !path.exists() {
@@ -481,12 +457,6 @@ unsafe fn drain_commands(hwnd: HWND, state: &mut ServiceState) {
                 if let Err(err) = Command::new("explorer.exe").arg(path).spawn() {
                     logger::info(format!("Open path failed: {err:#}"));
                     message_box(hwnd, &format!("Could not open path: {err}"), "Ashe Worker");
-                }
-            }
-            Win32Command::CopyText(text) => {
-                if let Err(err) = injector::copy_text(&text) {
-                    logger::info(format!("Copy text failed: {err:#}"));
-                    message_box(hwnd, &format!("Could not copy text: {err}"), "Ashe Worker");
                 }
             }
             Win32Command::PasteText { target_hwnd, text } => {
@@ -1397,13 +1367,6 @@ fn show_tray_menu(hwnd: HWND, active: bool, activity_running: bool, activity_sta
             MF_STRING,
             MENU_RELOAD_CONFIG,
             pcwstr(&wide("Reload config")),
-        );
-        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_LOG, pcwstr(&wide("Open log")));
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_COPY_LOG_PATH,
-            pcwstr(&wide("Copy log path")),
         );
         let _ = AppendMenuW(menu, MF_STRING, MENU_ABOUT, pcwstr(&wide("About")));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
