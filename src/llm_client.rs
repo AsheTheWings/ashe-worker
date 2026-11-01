@@ -18,8 +18,7 @@ pub async fn describe_activity_block(
     frames: Vec<(String, Vec<u8>)>,
     duration_budget_s: u64,
 ) -> Result<ActivityNarrative> {
-    config.validate_for_journal()?;
-    let endpoint = format!("{}/responses", config.tera_api_base.trim_end_matches('/'));
+    let endpoint = format!("{}/responses", config.llm_base_url);
     let mut content = vec![json!({ "type": "input_text", "text": context })];
     for (label, bytes) in frames {
         content.push(json!({ "type": "input_text", "text": label }));
@@ -44,7 +43,7 @@ pub async fn describe_activity_block(
         .context("failed to build activity HTTP client")?;
     let response = client
         .post(endpoint)
-        .bearer_auth(&config.tera_api_key)
+        .bearer_auth(&config.llm_api_key)
         .json(&body)
         .send()
         .await
@@ -81,8 +80,7 @@ pub async fn refresh_activity_summary(
     source: Value,
     max_chars: usize,
 ) -> Result<String> {
-    config.validate_for_journal()?;
-    let endpoint = format!("{}/responses", config.tera_api_base.trim_end_matches('/'));
+    let endpoint = format!("{}/responses", config.llm_base_url);
     let input = serde_json::to_string_pretty(&source)
         .context("failed to serialize rolling-summary source")?;
     let mut body = json!({
@@ -103,7 +101,7 @@ pub async fn refresh_activity_summary(
         .context("failed to build summary HTTP client")?;
     let response = client
         .post(endpoint)
-        .bearer_auth(&config.tera_api_key)
+        .bearer_auth(&config.llm_api_key)
         .json(&body)
         .send()
         .await
@@ -150,7 +148,6 @@ pub async fn fix_grammar(config: AppConfig, text: String) -> Result<String> {
     if text.is_empty() {
         return Ok(String::new());
     }
-    config.validate_for_grammar()?;
     let message = format!("{GRAMMAR_PROMPT}\n\n{}", tagged("text", text));
     request_response(
         &config,
@@ -169,7 +166,6 @@ pub async fn answer_question(config: AppConfig, question: String) -> Result<Stri
     if question.is_empty() {
         return Ok(String::new());
     }
-    config.validate_for_question()?;
     let message = format!("{QUESTION_PROMPT}\n\n{}", tagged("question", question));
     request_response(
         &config,
@@ -189,7 +185,7 @@ async fn request_response(
     user_content: String,
     temperature: f32,
 ) -> Result<String> {
-    let endpoint = format!("{}/responses", config.tera_api_base.trim_end_matches('/'));
+    let endpoint = format!("{}/responses", config.llm_base_url);
     let mut body = json!({
         "model": model,
         "input": [
@@ -210,17 +206,17 @@ async fn request_response(
         .context("failed to build reqwest client")?;
     let response = client
         .post(&endpoint)
-        .bearer_auth(&config.tera_api_key)
+        .bearer_auth(&config.llm_api_key)
         .json(&body)
         .send()
         .await
-        .context("tera responses request failed")?;
+        .context("responses request failed")?;
 
     let status = response.status();
     let payload: Value = response
         .json()
         .await
-        .context("tera responses returned a non-JSON body")?;
+        .context("responses returned a non-JSON body")?;
 
     if !status.is_success() {
         let message = payload
@@ -228,13 +224,13 @@ async fn request_response(
             .and_then(Value::as_str)
             .or_else(|| payload.get("detail").and_then(Value::as_str))
             .unwrap_or("unknown error");
-        return Err(anyhow!("tera responses failed ({status}): {message}"));
+        return Err(anyhow!("responses failed ({status}): {message}"));
     }
 
     let text = extract_output_text(&payload);
     let text = text.trim();
     if text.is_empty() {
-        return Err(anyhow!("tera returned an empty response"));
+        return Err(anyhow!("responses returned an empty response"));
     }
     Ok(text.to_string())
 }
@@ -296,7 +292,7 @@ fn tagged(tag: &str, body: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit {
     use super::{activity_instructions, apply_reasoning_effort};
     use serde_json::json;
 

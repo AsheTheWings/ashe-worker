@@ -508,7 +508,7 @@ impl BlockArtifact {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit {
     use super::{
         ActivityNarrative, BLOCK_SCHEMA_VERSION, BlockArtifact, LearningDepth, LearningMode,
         LearningSourceKind,

@@ -2,7 +2,7 @@
 
 use crate::logger;
 use crate::overlay_text::TextRasterizer;
-use crate::pill_renderer::{self, PillState, TopBarContent};
+use crate::pill_renderer;
 use crate::util::{pcwstr, wide};
 use anyhow::{Context, Result, anyhow};
 use std::ffi::c_void;
@@ -24,10 +24,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const CLASS_NAME: &str = "AsheWorkerLayeredOverlay";
-const WINDOW_NAME: &str = "Ashe Worker Dictation Overlay";
+const WINDOW_NAME: &str = "Ashe Worker Overlay";
 
 /// A Win32 layered window whose shape comes exclusively from per-pixel alpha.
-/// No chroma key, clipping region, or opaque backing surface participates.
 pub struct NativeOverlay {
     hwnd: HWND,
     surface: Option<LayeredSurface>,
@@ -36,16 +35,12 @@ pub struct NativeOverlay {
 }
 
 pub struct OverlayFrame<'a> {
+    /// Left edge of the pill.
     pub x: f32,
+    /// Bottom edge of the pill.
     pub y: f32,
     pub visible: bool,
-    pub bars: &'a [f32],
-    pub state: PillState,
-    pub main_text: Option<&'a str>,
-    pub top_bar: Option<&'a TopBarContent>,
-    /// Compact text-action pill (grammar, question): a small window with
-    /// one centered status word instead of the full dictate pill.
-    pub mini: bool,
+    pub text: Option<&'a str>,
 }
 
 impl NativeOverlay {
@@ -82,7 +77,6 @@ impl NativeOverlay {
                 Some(null_mut()),
             )
             .context("CreateWindowExW failed for layered overlay")?;
-            logger::info(format!("Native layered overlay created hwnd={:p}", hwnd.0));
             Ok(Self {
                 hwnd,
                 surface: None,
@@ -101,59 +95,23 @@ impl NativeOverlay {
             self.hide();
             return Ok(());
         }
-
         let anchor = POINT {
             x: frame.x.round() as i32,
             y: frame.y.round() as i32,
         };
-        let monitor_scale = monitor_scale_factor(anchor);
-        // The mini pill is its own window size: just the compact capsule
-        // with its bottom edge at the anchor, like the dictate pill.
-        let logical_width = if frame.mini {
-            pill_renderer::MINI_WIDTH
-        } else {
-            pill_renderer::WIDTH
+        let width = (pill_renderer::MINI_WIDTH * monitor_scale_factor(anchor))
+            .round()
+            .max(1.0) as u32;
+        let scale = width as f32 / pill_renderer::MINI_WIDTH;
+        let height = (pill_renderer::MINI_HEIGHT * scale).round().max(1.0) as u32;
+        let destination = POINT {
+            x: anchor.x,
+            y: anchor.y - height as i32,
         };
-        let width = (logical_width * monitor_scale).round().max(1.0) as u32;
-        let scale = width as f32 / logical_width;
-        let (height, destination, rgba) = if frame.mini {
-            let height = (pill_renderer::MINI_HEIGHT * scale).round().max(1.0) as u32;
-            let destination = POINT {
-                x: anchor.x,
-                y: anchor.y - height as i32,
-            };
-            let mut rgba = pill_renderer::render_mini_rgba(width, height, frame.state)
-                .ok_or_else(|| anyhow!("failed to allocate mini overlay frame"))?;
-            self.text
-                .draw_mini_text(&mut rgba, width, height, scale, frame.main_text);
-            (height, destination, rgba)
-        } else {
-            let main_top = (pill_renderer::MAIN_TOP * scale).round().max(0.0) as u32;
-            let main_height = (pill_renderer::PILL_HEIGHT * scale).round().max(1.0) as u32;
-            let height = main_top.saturating_add(main_height);
-            let destination = POINT {
-                x: anchor.x,
-                y: anchor.y - main_top as i32,
-            };
-            let mut rgba = pill_renderer::render_rgba(
-                width,
-                height,
-                frame.bars,
-                frame.state,
-                frame.main_text.is_none(),
-                frame.top_bar.is_some(),
-            )
-            .ok_or_else(|| anyhow!("failed to allocate layered overlay frame"))?;
-            self.text.draw(
-                &mut rgba,
-                width,
-                height,
-                scale,
-                frame.main_text,
-                frame.top_bar,
-            );
-            (height, destination, rgba)
-        };
+        let mut rgba = pill_renderer::render_mini_rgba(width, height)
+            .ok_or_else(|| anyhow!("failed to allocate the overlay frame"))?;
+        self.text
+            .draw_mini_text(&mut rgba, width, height, scale, frame.text);
 
         if self
             .surface
@@ -164,7 +122,6 @@ impl NativeOverlay {
         }
         let surface = self.surface.as_mut().expect("surface initialized");
         surface.copy_premultiplied_rgba(&rgba)?;
-
         let source = POINT::default();
         let size = SIZE {
             cx: width as i32,
@@ -189,26 +146,10 @@ impl NativeOverlay {
         )
         .context("UpdateLayeredWindow failed")?;
 
-        // Recover when Windows hides the overlay out from under us (display
-        // change, workspace switch, DWM reset). The internal flag alone
-        // cannot detect an external hide, which would otherwise leave
-        // dictation working with no visible pill and no further ShowWindow
-        // call to recover it.
-        let actually_visible = IsWindowVisible(self.hwnd).as_bool();
-        if !self.visible || !actually_visible {
-            if ShowWindow(self.hwnd, SW_SHOWNOACTIVATE).as_bool() || !actually_visible {
-                logger::info(format!(
-                    "Native layered overlay shown size={}x{} scale={scale:.2} \
-                     tracked_visible={} actual_visible={actually_visible} \
-                     mini={} at=({},{})",
-                    width,
-                    height,
-                    self.visible,
-                    frame.mini,
-                    destination.x,
-                    destination.y,
-                ));
-            }
+        // Windows can hide the overlay behind our back (display change, DWM
+        // reset); show it again whenever it is not actually visible.
+        if !self.visible || !IsWindowVisible(self.hwnd).as_bool() {
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             self.visible = true;
         }
         Ok(())

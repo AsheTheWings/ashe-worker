@@ -1,103 +1,153 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+#[cfg(windows)]
 mod activity_pipeline;
+#[cfg(windows)]
 mod activity_telemetry;
-mod audio;
-mod composition;
+#[cfg(windows)]
 mod injector;
+#[cfg(windows)]
 mod llm_client;
+#[cfg(windows)]
 mod native_overlay;
+#[cfg(windows)]
 mod observability;
+#[cfg(windows)]
 mod overlay_text;
+#[cfg(windows)]
 mod overlay_view;
-mod paste_upload;
+#[cfg(windows)]
 mod pill_renderer;
+#[cfg(windows)]
 mod screen_capture;
-mod spectrum;
-mod spoken_punctuation;
-mod stt;
+#[cfg(windows)]
 mod ui_app;
+#[cfg(windows)]
 mod util;
-mod voice;
-mod voice_audio;
+#[cfg(windows)]
 mod win32_service;
 
-use anyhow::Result;
-pub use ashe_worker::{archive, artifact_store, block_artifact, config, daily_report, logger};
+pub use ashe_worker::{artifact_store, block_artifact, config, daily_report, logger, records};
 use std::process::ExitCode;
-use ui_app::UiApp;
-use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
-};
 
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const BUILD_ID: &str = env!("ASHE_BUILD_ID");
+#[cfg(windows)]
+const REVISION: &str = env!("ASHE_WORKER_REVISION");
 
+#[cfg(not(windows))]
 fn main() -> ExitCode {
-    logger::remove_legacy_file();
-    config::load_env_file_near_exe();
-    let telemetry = observability::Telemetry::initialize(APP_VERSION, BUILD_ID);
-    if std::env::var("ASHE_WORKER_ENV").as_deref() == Ok("production")
-        && !telemetry.is_enabled()
-    {
-        telemetry.shutdown();
-        return ExitCode::FAILURE;
+    eprintln!("ashe-worker runs on Windows only");
+    ExitCode::FAILURE
+}
+
+/// Command-line modes besides running the tray application:
+/// `--version` prints the revision, `--check-inputs` validates the inputs and
+/// prints the result, and `--qualify-observability` emits one qualification
+/// trace, metric, and log record.
+#[cfg(windows)]
+fn main() -> ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let command_line_mode = arguments.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--version" | "--check-inputs" | "--qualify-observability"
+        )
+    });
+    if command_line_mode {
+        attach_parent_console();
     }
-    if std::env::args().any(|argument| argument == "--qualify-observability") {
-        if !telemetry.is_enabled() {
-            telemetry.shutdown();
+    if arguments.iter().any(|argument| argument == "--version") {
+        println!("ashe-worker {REVISION}");
+        return ExitCode::SUCCESS;
+    }
+    let check_only = arguments
+        .iter()
+        .any(|argument| argument == "--check-inputs");
+    let config = match config::AppConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            if check_only {
+                println!("{error}");
+            } else {
+                startup_failure(&format!(
+                    "Ashe Worker cannot start.\r\n\r\n{}",
+                    error.problems.join("\r\n")
+                ));
+            }
+            return ExitCode::from(2);
+        }
+    };
+    if check_only {
+        println!("inputs: ok");
+        return ExitCode::SUCCESS;
+    }
+    let telemetry = match observability::Telemetry::initialize(&config.telemetry, REVISION) {
+        Ok(telemetry) => telemetry,
+        Err(error) => {
+            startup_failure(&format!("Ashe Worker cannot start telemetry: {error}"));
             return ExitCode::FAILURE;
         }
+    };
+    if arguments
+        .iter()
+        .any(|argument| argument == "--qualify-observability")
+    {
         telemetry.emit_qualification();
         telemetry.shutdown();
         return ExitCode::SUCCESS;
     }
-    install_panic_logger();
-    let result = match run() {
-        Ok(()) => {
-            logger::info("Ashe Worker runtime exited cleanly");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            logger::info(format!("Ashe Worker runtime failed: {error:#}"));
+    std::panic::set_hook(Box::new(|_| logger::info("Unhandled panic")));
+    init_process_dpi_awareness();
+    let result = iced::application(
+        move || ui_app::UiApp::new(config.clone()),
+        ui_app::UiApp::update,
+        ui_app::UiApp::view,
+    )
+    .title(|_: &ui_app::UiApp| overlay_view::TITLE.to_string())
+    .subscription(ui_app::UiApp::subscription)
+    .window(overlay_view::window_settings())
+    .run();
+    let code = match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => {
+            logger::info("Ashe Worker runtime failed");
             ExitCode::FAILURE
         }
     };
     telemetry.shutdown();
-    result
+    code
 }
 
-fn run() -> Result<()> {
-    init_process_dpi_awareness();
-    init_rustls_crypto_provider();
-    logger::info(format!("Build version={APP_VERSION} build_id={BUILD_ID}"));
-    logger::info("Launching Iced UI on main thread");
-    iced::application(UiApp::new, UiApp::update, UiApp::view)
-        .title(app_title)
-        .subscription(UiApp::subscription)
-        .window(overlay_view::window_settings())
-        .run()
-        .map_err(|err| anyhow::anyhow!("Iced runtime failed: {err:#}"))
+#[cfg(windows)]
+fn startup_failure(text: &str) {
+    win32_service::message_box(
+        windows::Win32::Foundation::HWND::default(),
+        text,
+        "Ashe Worker",
+    );
 }
 
-fn install_panic_logger() {
-    std::panic::set_hook(Box::new(move |panic| {
-        logger::info(format!("Unhandled panic: {panic}"));
-    }));
-}
-
-fn app_title(_app: &UiApp) -> String {
-    overlay_view::TITLE.to_string()
-}
-
-fn init_process_dpi_awareness() {
+/// Give a command-line mode the parent's console unless its output is
+/// already redirected, since the release binary has no console of its own.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE,
+    };
     unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let redirected = GetStdHandle(STD_OUTPUT_HANDLE)
+            .is_ok_and(|handle| !handle.is_invalid() && !handle.0.is_null());
+        if !redirected {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
     }
 }
 
-fn init_rustls_crypto_provider() {
-    match rustls::crypto::aws_lc_rs::default_provider().install_default() {
-        Ok(()) => logger::info("Rustls crypto provider initialized: aws-lc-rs"),
-        Err(_) => logger::info("Rustls crypto provider was already initialized"),
+#[cfg(windows)]
+fn init_process_dpi_awareness() {
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 }

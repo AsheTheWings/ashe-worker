@@ -1,5 +1,4 @@
 use crate::activity_telemetry::{self, ActivitySample};
-use crate::archive::ArchiveHandle;
 use crate::block_artifact::{
     ActivityNarrative, BLOCK_SCHEMA_VERSION, BlockArtifact, BlockDocumentInput,
 };
@@ -254,7 +253,6 @@ fn run(
 ) -> Result<()> {
     prepare_store(&config.activity_artifacts_dir)?;
     let _daily_reports = DailyReportHandle::spawn(config.clone());
-    let _archives = ArchiveHandle::spawn(config.clone());
     let descriptions = DescriptionQueue::spawn(config.clone(), Arc::clone(status));
     let mut running = config.activity_enabled;
     let block_seconds = (config.activity_block_minutes * 60) as i64;
@@ -263,15 +261,6 @@ fn run(
     let mut next_capture = now();
     let mut was_inactive = false;
 
-    if running && config.tera_api_key.trim().is_empty() {
-        running = false;
-        set_status(
-            status,
-            false,
-            "activity tracking paused: TERA_API_KEY is missing".to_string(),
-            0,
-        );
-    }
     if running {
         block = recover_pending(&config, block_seconds, &descriptions)?;
         logger::info(format!(
@@ -303,13 +292,6 @@ fn run(
                     dedup_state.clear();
                     running = false;
                     set_status(status, false, "activity tracking paused".to_string(), 0);
-                } else if config.tera_api_key.trim().is_empty() {
-                    set_status(
-                        status,
-                        false,
-                        "activity tracking needs TERA_API_KEY".to_string(),
-                        0,
-                    );
                 } else {
                     running = true;
                     block = recover_pending(&config, block_seconds, &descriptions)?;
@@ -796,7 +778,6 @@ fn recover_pending(
 
 fn prepare_store(root: &Path) -> Result<()> {
     fs::create_dir_all(root.join("pending"))?;
-    fs::create_dir_all(root.join("logs"))?;
     Ok(())
 }
 
@@ -856,12 +837,6 @@ fn write_report(
 ) -> Result<()> {
     let _write_guard = crate::artifact_store::lock(&config.activity_artifacts_dir)?;
     let directory = day_dir(&config.activity_artifacts_dir, &block.day);
-    anyhow::ensure!(
-        !directory
-            .join(ashe_archive_crypto::ARCHIVE_FILENAME)
-            .is_file(),
-        "refusing to write a block into a sealed day"
-    );
     fs::create_dir_all(directory.join("blocks"))?;
     fs::create_dir_all(directory.join("keyframes"))?;
     let keyframe = block
@@ -968,12 +943,6 @@ fn write_terminal_block(
 ) -> Result<()> {
     let _write_guard = crate::artifact_store::lock(&config.activity_artifacts_dir)?;
     let directory = day_dir(&config.activity_artifacts_dir, &block.day);
-    anyhow::ensure!(
-        !directory
-            .join(ashe_archive_crypto::ARCHIVE_FILENAME)
-            .is_file(),
-        "refusing to write a terminal block into a sealed day"
-    );
     fs::create_dir_all(directory.join("blocks"))?;
     let path = report_path(&config.activity_artifacts_dir, block);
     let artifact = BlockArtifact {
@@ -1298,22 +1267,14 @@ fn clock(ts: i64, format: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit {
     use super::{
-        ActivitySample, Block, BlockArtifact, DedupState, DescriptionQueue, FrameRecord,
-        capture_interval_for_sample, context_detailed_offset, json_journal_entry, matches_denylist,
-        select_frame_candidates, select_frame_candidates_with_size, should_suppress_description,
-        write_report,
+        ActivitySample, Block, BlockArtifact, DedupState, FrameRecord, capture_interval_for_sample,
+        context_detailed_offset, json_journal_entry, matches_denylist, select_frame_candidates,
+        select_frame_candidates_with_size, should_suppress_description,
     };
-    use crate::block_artifact::{
-        ActivityNarrative, ActivitySubject, BLOCK_SCHEMA_VERSION, LearningDepth, LearningMode,
-        LearningRecord, LearningSubject,
-    };
-    use crate::config::AppConfig;
+    use crate::block_artifact::{ActivitySubject, BLOCK_SCHEMA_VERSION};
     use std::collections::BTreeMap;
-    use std::fs;
-    use std::sync::mpsc;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn context_keeps_only_the_configured_number_of_recent_blocks_in_full() {
@@ -1435,6 +1396,67 @@ mod tests {
     }
 
     #[test]
+    fn pending_manifest_round_trips_the_unified_pipeline_shape() {
+        let block = Block::new(0, 600);
+        let recovered: Block =
+            serde_json::from_slice(&serde_json::to_vec(&block).unwrap()).unwrap();
+        assert_eq!(
+            recovered.schema_version,
+            super::PENDING_BLOCK_SCHEMA_VERSION
+        );
+        assert_eq!(recovered.attempts, 0);
+    }
+
+    #[test]
+    fn description_is_suppressed_only_for_low_activity_and_static_visuals() {
+        assert!(should_suppress_description(29, 1, 30));
+        assert!(!should_suppress_description(30, 1, 30));
+        assert!(!should_suppress_description(0, 2, 30));
+        assert!(!should_suppress_description(0, 1, 0));
+    }
+
+    #[test]
+    fn dedup_compares_against_the_last_retained_fingerprint() {
+        let mut state = DedupState::default();
+        assert_eq!(state.observe(vec![0; 100], 0, 0.5, 120), 100.0);
+
+        let mut gradual = vec![0; 100];
+        gradual[0] = 5;
+        assert_eq!(state.observe(gradual, 20, 0.5, 120), 0.0);
+
+        let mut accumulated = vec![0; 100];
+        accumulated[0] = 10;
+        assert_eq!(state.observe(accumulated, 40, 0.5, 120), 1.0);
+        assert_eq!(state.retained_ts, Some(40));
+    }
+
+    #[test]
+    fn maximum_gap_advances_the_visual_baseline() {
+        let mut state = DedupState::default();
+        state.observe(vec![0; 100], 0, 2.0, 120);
+
+        let mut low_delta = vec![0; 100];
+        low_delta[0] = 10;
+        assert_eq!(state.observe(low_delta.clone(), 120, 2.0, 120), 1.0);
+        assert_eq!(state.retained_ts, Some(120));
+        assert_eq!(state.observe(low_delta, 140, 2.0, 120), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod component {
+    use super::{Block, BlockArtifact, DescriptionQueue, write_report};
+    use crate::block_artifact::{
+        ActivityNarrative, ActivitySubject, LearningDepth, LearningMode, LearningRecord,
+        LearningSubject,
+    };
+    use crate::config::AppConfig;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
     fn delayed_description_processing_does_not_block_the_capture_caller() {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1451,21 +1473,9 @@ mod tests {
     }
 
     #[test]
-    fn pending_manifest_round_trips_the_unified_pipeline_shape() {
-        let block = Block::new(0, 600);
-        let recovered: Block =
-            serde_json::from_slice(&serde_json::to_vec(&block).unwrap()).unwrap();
-        assert_eq!(
-            recovered.schema_version,
-            super::PENDING_BLOCK_SCHEMA_VERSION
-        );
-        assert_eq!(recovered.attempts, 0);
-    }
-
-    #[test]
     fn activity_and_learning_are_written_to_one_block_artifact() {
         let root = tempfile_directory("unified-learning");
-        let mut config = AppConfig::load();
+        let mut config = AppConfig::synthetic(root.clone());
         config.activity_artifacts_dir = root.clone();
         config.journal_model = "test-model".to_string();
         let block = Block::new(0, 600);
@@ -1516,41 +1526,6 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn description_is_suppressed_only_for_low_activity_and_static_visuals() {
-        assert!(should_suppress_description(29, 1, 30));
-        assert!(!should_suppress_description(30, 1, 30));
-        assert!(!should_suppress_description(0, 2, 30));
-        assert!(!should_suppress_description(0, 1, 0));
-    }
-
-    #[test]
-    fn dedup_compares_against_the_last_retained_fingerprint() {
-        let mut state = DedupState::default();
-        assert_eq!(state.observe(vec![0; 100], 0, 0.5, 120), 100.0);
-
-        let mut gradual = vec![0; 100];
-        gradual[0] = 5;
-        assert_eq!(state.observe(gradual, 20, 0.5, 120), 0.0);
-
-        let mut accumulated = vec![0; 100];
-        accumulated[0] = 10;
-        assert_eq!(state.observe(accumulated, 40, 0.5, 120), 1.0);
-        assert_eq!(state.retained_ts, Some(40));
-    }
-
-    #[test]
-    fn maximum_gap_advances_the_visual_baseline() {
-        let mut state = DedupState::default();
-        state.observe(vec![0; 100], 0, 2.0, 120);
-
-        let mut low_delta = vec![0; 100];
-        low_delta[0] = 10;
-        assert_eq!(state.observe(low_delta.clone(), 120, 2.0, 120), 1.0);
-        assert_eq!(state.retained_ts, Some(120));
-        assert_eq!(state.observe(low_delta, 140, 2.0, 120), 0.0);
     }
 
     fn tempfile_directory(label: &str) -> std::path::PathBuf {
