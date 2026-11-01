@@ -13,7 +13,11 @@ use std::path::{Path, PathBuf};
 pub const PROFILE: &str = "ASHE_WORKER_PROFILE";
 pub const OVERLAY_FILE: &str = "ASHE_WORKER_OVERLAY_FILE";
 pub const PROTECTED_FILE: &str = "ASHE_WORKER_PROTECTED_FILE";
-const OWN_PREFIX: &str = "ASHE_WORKER_";
+/// Process names under these prefixes are the worker's to declare. The
+/// OpenTelemetry SDK reads further `OTEL_` names from the environment itself,
+/// so an undeclared one would bypass this loader. Windows matches environment
+/// names in any case, so the prefixes do too.
+const OWN_PREFIXES: [&str; 2] = ["ASHE_WORKER_", "OTEL_"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
@@ -619,7 +623,10 @@ pub fn load(sources: &Sources<'_>) -> Result<Environment, InputError> {
                 "{name} is protected and may not be set in {}",
                 Layer::Process.name()
             )),
-            None if name.starts_with(OWN_PREFIX) => {
+            None if OWN_PREFIXES
+                .iter()
+                .any(|prefix| name.to_ascii_uppercase().starts_with(prefix)) =>
+            {
                 problems.push(format!("{name} is not a declared input"));
             }
             None => {}
@@ -1007,6 +1014,10 @@ mod unit {
         let error = load_with(
             &[
                 ("ASHE_WORKER_TYPO", "1"),
+                ("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "512"),
+                ("otel_bsp_max_queue_size", "16"),
+                ("otel_exporter_otlp_headers", "x=1"),
+                ("OTHER_TOOL_SETTING", "1"),
                 ("ASHE_WORKER_SERVER_URL", "http://server.test/path"),
             ],
             FileLayer::Present(format!(
@@ -1017,6 +1028,24 @@ mod unit {
         )
         .unwrap_err();
         assert!(has(&error, "ASHE_WORKER_TYPO is not a declared input"));
+        assert!(has(
+            &error,
+            "OTEL_BSP_MAX_EXPORT_BATCH_SIZE is not a declared input"
+        ));
+        assert!(has(
+            &error,
+            "otel_bsp_max_queue_size is not a declared input"
+        ));
+        assert!(has(
+            &error,
+            "otel_exporter_otlp_headers is not a declared input"
+        ));
+        assert!(
+            !error
+                .problems
+                .iter()
+                .any(|problem| problem.contains("OTHER_TOOL_SETTING"))
+        );
         assert!(has(
             &error,
             "ASHE_WORKER_SERVER_URL must be an http(s) origin"
