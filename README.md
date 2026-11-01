@@ -1,147 +1,52 @@
 # Ashe Worker
 
-Ashe Worker is a tray-based Windows companion for hands-free writing, quick text assistance, and
-personal activity reflection. It combines speech transcription, contextual text actions, and an
-automatic journal of computer activity and learning in one lightweight desktop application.
+Ashe Worker is a Windows tray application for quick text assistance and a
+personal journal of computer activity. It corrects or answers questions about
+selected text through any OpenAI Responses API, describes what happens on
+screen in ten-minute blocks, and sends each finished day to a records server.
 
-The project is intended for people who want useful context about how they spend time at their
-computer without manually maintaining a work log. Reports remain available as local artifacts,
-and older records can be placed in encrypted archives for retention or backup.
+The repository publishes one artifact: `ashe-worker.exe`, built and qualified
+by CI on every pull request and on every push to `dev`.
 
 ## Features
 
-- Dictate into the active application.
-- Correct selected text or ask a question about it.
-- Create activity, learning, and daily reports automatically.
-- Keep a rolling summary and chronological journal.
-- Exclude configured applications from activity capture.
-- Encrypt older records and optionally upload the encrypted archives.
-- Upload a clipboard image and paste its remote path into the active application.
-- Talk with Ashe Assistant through a background voice call.
+- Correct the selected text in place (`Win+Shift+G`).
+- Ask a question about the selected text and append the answer after it
+  (`Win+Shift+Q`).
+- Describe activity and learning per block, keep a rolling summary and a
+  chronological journal, and write a report for each finished day.
+- Skip configured applications and pause while Windows is locked.
+- Upload each finished day to a records server, then remove it locally after
+  a retention window.
 
-## Getting started
+While a text action runs, a small `processing` pill follows the cursor;
+`Esc` cancels it. Only `Esc` is captured, so typing keeps reaching the
+foreground application.
 
-1. Build or obtain `ashe-worker.exe` and place it in a directory where it can keep its local
-   configuration and artifacts.
-2. Copy [.env.example](.env.example) to `.env` beside the executable or at the project root.
-3. Add the credentials for the features you want to use and review the optional paths, privacy
-   exclusions, per-feature LLM models, reporting, and archive settings.
-4. Launch `ashe-worker.exe`.
+## Setup
 
-The app starts in the Windows system tray. Left-click the tray icon to open the artifact
-collection. Right-click it to control features, reload configuration, or quit.
+1. Get `ashe-worker.exe` as [building](docs/building.md) describes and place
+   it in `%LOCALAPPDATA%\Programs\ashe-worker\`.
+2. Write the overlay file `%APPDATA%\ashe-worker\config.env` and the
+   protected file `%APPDATA%\ashe-worker\protected.env` as
+   [configuration](docs/configuration.md) describes.
+3. Check the inputs from a terminal:
 
-## Hotkeys
+   ```powershell
+   & "$env:LOCALAPPDATA\Programs\ashe-worker\ashe-worker.exe" --check-inputs
+   ```
 
-| Hotkey | Action |
-| --- | --- |
-| `Win+Shift+H` | Start or stop dictation |
-| `Win+Shift+A` | Start or stop the background Ashe voice call |
-| `Win+Shift+G` | Correct selected text |
-| `Win+Shift+Q` | Ask a question using selected text |
-| `Ctrl+Alt+V` | Upload a clipboard image and paste its remote path |
+4. Launch `ashe-worker.exe`. To start it at sign-in, place a shortcut to it
+   in `shell:startup`.
 
-Pressing `Esc` cancels an in-flight grammar or question request; only the
-cancel key is captured, so typing keeps reaching the foreground app.
+The tray icon's left click opens the records folder; its menu pauses or
+resumes activity tracking, opens today's journal, reloads the configuration,
+and quits.
 
-During dictation, microphone audio is buffered locally while the pill overlay
-shows a live voice spectrum. Printable input and `Ctrl+V` switch to a private
-typing buffer without writing into the foreground application. A status bar is
-always rendered above the pill as one connected body, with no border across
-the contact surface. Its left side always shows the insertion count. While
-typing with content it shows a trailing preview, representing clipboard
-spans as `[pasted]`; otherwise it shows a centered recording timer.
-`Shift+Enter` inserts a line break without ending the session. While
-listening, the bar shows `↵` at its right edge for 1.5 seconds; while typing,
-`↵` stays inline in the editable preview and one `Backspace` removes it. The
-marker renders larger in cyan, with horizontal padding in the typing preview.
-Press `Enter` with content to commit it and resume listening. Press `Enter`
-with an empty buffer to finish, or `Esc` to cancel the whole session.
-Navigation and unrelated system shortcuts continue to work normally. Direct
-IME and emoji-panel composition is not captured; use `Ctrl+V` for that
-content.
+## Documentation
 
-Natural pauses remain intact. Once silence reaches five seconds, dead air is
-compacted locally and the bar shows `silence skipped` instead of the timer;
-compacted audio is never submitted as a separate request. When the session
-finishes, all retained speech is sent once to the self-hosted transcription
-engine behind the Ashe API server (Whisper, requires `ASHE_STT_TOKEN`). Word
-alignment is skipped when the full-context transcript can be inserted
-directly, and retained only when multiple speech ranges must be interleaved
-with exact typed or pasted content. Transient requests retry once. The result
-is inserted once into the application where dictation started, with no LLM
-polishing. While transcription runs, the pill shows `processing...`.
-Dictation requires `ASHE_STT_TOKEN`.
-
-Spoken punctuation is converted automatically: say `comma`, `period`,
-`question mark`, `exclamation mark`, `colon`, `semicolon`, `double quote`,
-`single quote`, `new line`, or `new paragraph` and the symbol is inserted
-while the command words are dropped. Say `literal` before a command to keep
-the words instead. Set `ASHE_SPOKEN_PUNCTUATION=0` to disable.
-
-## Voice assistant
-
-`Win+Shift+A` starts or stops a background, audio-only WebRTC call using the
-default Windows microphone and speaker. No browser or separate voice window is
-opened. The app sends only the WebRTC offer and the dedicated
-`ASHE_ASSISTANT_CLIENT_TOKEN` to the authenticated Ashe Worker Server route;
-the server forwards signaling to Ashe Assistant. Media flows directly over the
-WebRTC connection. ChatGPT credentials and agent sessions remain on the Linux
-service. Dictation and voice cannot run together.
-
-Voice playback is not echo-cancelled in this version; use a headset to keep
-speaker output from feeding back into the microphone. On stop or exit, Ashe
-Worker closes its peer connection and requests server-side session teardown.
-If another voice session is already active, a new call is refused rather than
-disconnecting it.
-
-## Activity records
-
-When enabled, activity tracking periodically observes the configured display and produces local
-reports describing meaningful activity and learning. The artifact collection includes recent
-reports, a chronological journal, a rolling summary, and daily overviews.
-
-Review [.env.example](.env.example) to choose where records are stored, disable tracking, exclude
-sensitive applications, or configure retention and encrypted backup. Activity capture pauses while
-Windows is locked.
-
-## Encrypted archives
-
-The companion CLI can manage encrypted activity archives:
-
-```powershell
-.\ashe-worker-cli.exe archive seal <YYYY-MM-DD>
-.\ashe-worker-cli.exe archive upload <archive.ashe>
-.\ashe-worker-cli.exe archive decrypt <archive.ashe> <output-directory>
-```
-
-Archive recovery requires the passphrase created when the archive is sealed. Store that passphrase
-safely; it cannot be recovered by the application.
-
-## Building
-
-Build the Windows application and CLI with Cargo:
-
-```powershell
-cargo build --release
-```
-
-Linux and WSL users can use the included cross-build helper after configuring the release settings
-described in [.env.example](.env.example):
-
-```bash
-./scripts/ship-windows-release.sh
-```
-
-The helper validates the runtime `.env.local` already present in `ASHE_RELEASE_DIR`; it does not
-copy the project `.env.local` or secrets into the release directory.
-
-After installing a release, run `ashe-worker.exe --qualify-observability`
-once to emit the bounded production trace, metric, and LogRecord canary before
-starting the normal background process.
-
-## Troubleshooting
-
-Operational diagnostics are exported only as privacy-bounded OpenTelemetry
-traces, metrics, and LogRecords. Ashe Worker does not create a local diagnostic
-log.
+- [Configuration](docs/configuration.md): inputs, their layers, and file locations.
+- [Records](docs/records.md): the data directory and the upload contract.
+- [Observability](docs/observability.md): telemetry export and the signal catalog.
+- [Building](docs/building.md): toolchain, CI artifacts, and updating an installed copy.
+- [Testing](docs/testing.md): test classes and their commands.
