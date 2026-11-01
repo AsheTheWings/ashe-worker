@@ -10,7 +10,8 @@ user-facing results, not telemetry.
 select `otlp`, `console`, or `none` per signal. OTLP uses HTTP with protobuf;
 each signal goes to `<OTEL_EXPORTER_OTLP_ENDPOINT>/v1/<signal>` with the
 protected `OTEL_EXPORTER_OTLP_HEADERS`. Exports time out after 10 seconds and
-flush when the worker exits. A failed export is dropped, with no fallback.
+flush when the worker exits. Each request carries at most 64 spans or log
+records. A failed export is dropped, with no fallback.
 
 Every signal carries `service.namespace` `ashe`, `service.name`
 `ashe-worker`, `service.version` set to the build revision, a random

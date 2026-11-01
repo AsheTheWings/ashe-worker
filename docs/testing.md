@@ -7,7 +7,9 @@ cargo test --locked
 ```
 
 Tests read no environment variable or user file; they build their inputs and
-configuration explicitly with synthetic credentials.
+configuration explicitly with synthetic credentials. The OpenTelemetry SDK
+reads `OTEL_` names itself, so the telemetry component tests refuse to run
+while any is set.
 
 | Class | Boundary | Command |
 | --- | --- | --- |
