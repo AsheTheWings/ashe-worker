@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: 1.98.0
+  CARGO_TERM_COLOR: never
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Test, build, and qualify the exact executable, then keep it as a run artifact.
+  build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component clippy,rustfmt
+          rustup default $env:RUST_TOOLCHAIN
+      - name: Check formatting and lints
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Run the fast gate
+        run: cargo test --locked
+      - name: Build the release executable
+        env:
+          ASHE_WORKER_REVISION: ${{ github.sha }}
+        run: cargo build --release --locked --bin ashe-worker
+      - name: Qualify the release executable
+        run: ./scripts/qualify.ps1 -Executable target/release/ashe-worker.exe -Revision $env:GITHUB_SHA
+      - name: Record the executable digest
+        run: |
+          $digest = (Get-FileHash -Algorithm SHA256 target/release/ashe-worker.exe).Hash.ToLowerInvariant()
+          "SHA-256: $digest" | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ashe-worker-${{ github.sha }}
+          path: target/release/ashe-worker.exe
+          if-no-files-found: error
+          retention-days: 30
