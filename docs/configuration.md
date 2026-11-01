@@ -25,10 +25,11 @@ required. `ASHE_WORKER_OVERLAY_FILE` and `ASHE_WORKER_PROTECTED_FILE` move
 the two files and are read from the process environment only.
 
 An absent file contributes nothing. A file that is present but unreadable or
-malformed stops the worker, and so does an undeclared `ASHE_WORKER_` name, a
-name set twice in one file, or a value of the wrong shape. Errors name the
-inputs, never their values. At startup the worker shows them in a message
-box; `ashe-worker.exe --check-inputs` prints them and exits with status 2.
+malformed stops the worker, and so does an undeclared `ASHE_WORKER_` or
+`OTEL_` name, a name set twice in one file, or a value of the wrong shape.
+Errors name the inputs, never their values. At startup the worker shows them
+in a message box; `ashe-worker.exe --check-inputs` prints them and exits with
+status 2.
 
 ## Files
 
