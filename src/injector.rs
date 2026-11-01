@@ -1,26 +1,18 @@
 use crate::logger;
-use crate::util::{pcwstr, wide};
+use crate::util::wide;
 use anyhow::{Context, Result, anyhow};
-use image::ExtendedColorType;
-use image::ImageEncoder;
-use image::codecs::png::PngEncoder;
-use std::ffi::c_void;
 use std::mem::size_of;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
-use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, GetObjectW,
-    HBITMAP, HGDIOBJ, ReleaseDC,
-};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    RegisterClipboardFormatW, SetClipboardData,
+    SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows::Win32::System::Ole::{CF_BITMAP, CF_UNICODETEXT};
+use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
     VK_CONTROL, VK_LWIN, VK_MENU, VK_RIGHT, VK_RWIN, VK_SHIFT,
@@ -33,136 +25,8 @@ const COPY_SETTLE_DELAY: Duration = Duration::from_millis(120);
 const PASTE_SETTLE_DELAY: Duration = Duration::from_millis(180);
 const MODIFIER_RELEASE_TIMEOUT: Duration = Duration::from_millis(1000);
 const MODIFIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const MAX_PASTE_PNG_BYTES: usize = 20 * 1024 * 1024;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
-const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 pub(crate) const ASHE_INJECTED_EXTRA_INFO: usize = 0x4153_4845_574b_5252;
-
-pub fn copy_text(text: &str) -> Result<()> {
-    set_clipboard_text(text).context("failed to set clipboard text")?;
-    logger::info("Copied text to clipboard");
-    Ok(())
-}
-
-pub fn capture_clipboard_png() -> Result<Vec<u8>> {
-    let _guard = ClipboardGuard::open()?;
-    unsafe {
-        // Applications such as browsers commonly publish an encoded PNG in the
-        // registered "PNG" clipboard format alongside CF_BITMAP. Prefer it so
-        // transparency, color-profile chunks, and metadata survive unchanged.
-        if let Some(png) = read_native_clipboard_png()? {
-            return Ok(png);
-        }
-
-        if IsClipboardFormatAvailable(CF_BITMAP.0 as u32).is_err() {
-            return Err(anyhow!("clipboard does not contain an image"));
-        }
-        let handle = GetClipboardData(CF_BITMAP.0 as u32)?;
-        let bitmap = HBITMAP(handle.0);
-        let mut object = BITMAP::default();
-        if GetObjectW(
-            HGDIOBJ(bitmap.0),
-            size_of::<BITMAP>() as i32,
-            Some((&mut object as *mut BITMAP).cast::<c_void>()),
-        ) == 0
-        {
-            return Err(anyhow!("GetObjectW failed for clipboard bitmap"));
-        }
-        let width = u32::try_from(object.bmWidth).context("clipboard image width is invalid")?;
-        let height = object.bmHeight.unsigned_abs();
-        let pixels = usize::try_from(width)
-            .ok()
-            .and_then(|width| {
-                usize::try_from(height)
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .context("clipboard image dimensions overflow")?;
-        if width == 0 || height == 0 || pixels > 100_000_000 {
-            return Err(anyhow!(
-                "clipboard image dimensions exceed the safety limit"
-            ));
-        }
-        let byte_count = pixels
-            .checked_mul(4)
-            .context("clipboard image byte size overflow")?;
-        let mut info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width as i32,
-                biHeight: -(height as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                biSizeImage: u32::try_from(byte_count).context("clipboard image is too large")?,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let screen = GetDC(None);
-        if screen.is_invalid() {
-            return Err(anyhow!("GetDC failed for clipboard bitmap"));
-        }
-        let mut rgba = vec![0_u8; byte_count];
-        let rows = GetDIBits(
-            screen,
-            bitmap,
-            0,
-            height,
-            Some(rgba.as_mut_ptr().cast::<c_void>()),
-            &mut info,
-            DIB_RGB_COLORS,
-        );
-        ReleaseDC(None, screen);
-        if rows == 0 {
-            return Err(anyhow!("GetDIBits failed for clipboard bitmap"));
-        }
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-            pixel[3] = 255;
-        }
-        let mut png = Vec::new();
-        PngEncoder::new(&mut png)
-            .write_image(&rgba, width, height, ExtendedColorType::Rgba8)
-            .context("clipboard PNG encoding failed")?;
-        Ok(png)
-    }
-}
-
-unsafe fn read_native_clipboard_png() -> Result<Option<Vec<u8>>> {
-    let format_name = wide("PNG");
-    let format = unsafe { RegisterClipboardFormatW(pcwstr(&format_name)) };
-    if format == 0 {
-        return Err(anyhow!("failed to register the PNG clipboard format"));
-    }
-    if unsafe { IsClipboardFormatAvailable(format) }.is_err() {
-        return Ok(None);
-    }
-
-    let handle = unsafe { GetClipboardData(format) }?;
-    let global = HGLOBAL(handle.0);
-    let size = unsafe { GlobalSize(global) };
-    if size == 0 {
-        return Err(anyhow!("native clipboard PNG is empty"));
-    }
-    if size > MAX_PASTE_PNG_BYTES {
-        return Err(anyhow!("native clipboard PNG exceeds the upload limit"));
-    }
-
-    let ptr = unsafe { GlobalLock(global) } as *const u8;
-    if ptr.is_null() {
-        return Err(anyhow!(
-            "GlobalLock failed while reading native clipboard PNG"
-        ));
-    }
-    let png = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
-    let _ = unsafe { GlobalUnlock(global) };
-
-    if !png.starts_with(PNG_SIGNATURE) {
-        return Err(anyhow!("native clipboard PNG has an invalid signature"));
-    }
-    Ok(Some(png))
-}
 
 pub fn capture_selected_text() -> Result<Option<String>> {
     // Selection capture is triggered by a global hotkey (e.g. Win+Shift+G) that fires on
@@ -202,32 +66,19 @@ pub fn capture_selected_text() -> Result<Option<String>> {
     Ok(selected_text)
 }
 
-pub fn capture_clipboard_text() -> Result<Option<String>> {
-    read_clipboard_text()
-}
-
-pub fn paste_text(text: &str) -> Result<()> {
+fn paste_text(text: &str) -> Result<()> {
     if text.is_empty() {
         return Ok(());
     }
-
     set_clipboard_text(text).context("failed to set clipboard text")?;
-    logger::info(format!("Pasting text chars={}", text.chars().count()));
+    logger::info(format!(
+        "Clipboard injection chars={}",
+        text.chars().count()
+    ));
     wait_for_modifiers_released();
     send_ctrl_v().context("failed to send Ctrl+V")?;
     thread::sleep(PASTE_SETTLE_DELAY);
-
     Ok(())
-}
-
-pub fn paste_text_to(hwnd: HWND, text: &str) -> Result<()> {
-    unsafe {
-        if !hwnd.0.is_null() {
-            let _ = SetForegroundWindow(hwnd);
-            thread::sleep(Duration::from_millis(90));
-        }
-    }
-    paste_text(text)
 }
 
 /// Refocus `hwnd` and inject `text`. When `append_after_selection` is set, the current

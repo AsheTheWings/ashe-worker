@@ -49,7 +49,7 @@ pub fn keep_helper_hidden<Message: 'static>(id: window::Id) -> Task<Message> {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit {
     #[test]
     fn overlay_close_request_does_not_exit_tray_application() {
         assert!(!super::window_settings().exit_on_close_request);

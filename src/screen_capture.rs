@@ -123,7 +123,7 @@ pub fn capture_screen(all_monitors: bool) -> Result<CapturedFrame> {
         return Err(anyhow!("GetDIBits failed"));
     }
 
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
         pixel[3] = 255;
     }
@@ -177,7 +177,7 @@ pub fn changed_percent(previous: &[u8], current: &[u8]) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit {
     use super::changed_percent;
 
     #[test]

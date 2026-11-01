@@ -3,12 +3,12 @@ use crate::config::AppConfig;
 use crate::logger;
 use anyhow::Result;
 use chrono::{Local, NaiveDate, TimeZone};
-use crossbeam_channel::{Receiver, Sender};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DAILY_SCAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -23,7 +23,7 @@ impl DailyReportHandle {
         if !config.daily_report_enabled {
             return Self { tx: None };
         }
-        let (tx, rx) = crossbeam_channel::bounded(1);
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || run(config, rx));
         Self { tx: Some(tx) }
     }
@@ -80,8 +80,8 @@ fn run(config: AppConfig, stop: Receiver<()>) {
             logger::info(format!("Daily report scan failed: {error:#}"));
         }
         match stop.recv_timeout(DAILY_SCAN_INTERVAL) {
-            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => {}
         }
     }
 }
@@ -99,13 +99,6 @@ fn scan_closed_days(config: &AppConfig) -> Result<()> {
         .collect::<Vec<_>>();
     days.sort();
     for day in days {
-        if root
-            .join(&day)
-            .join(ashe_archive_crypto::ARCHIVE_FILENAME)
-            .is_file()
-        {
-            continue;
-        }
         if !grace_period_elapsed(&day, config.daily_report_grace_minutes) {
             continue;
         }
@@ -116,7 +109,7 @@ fn scan_closed_days(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-fn grace_period_elapsed(day: &str, grace_minutes: u64) -> bool {
+pub(crate) fn grace_period_elapsed(day: &str, grace_minutes: u64) -> bool {
     day_bounds(day).is_some_and(|(_, end)| now() >= end.saturating_add((grace_minutes * 60) as i64))
 }
 
@@ -140,11 +133,8 @@ pub(crate) fn generate_day(config: &AppConfig, day: &str) -> Result<()> {
         body,
     );
     let _write_guard = crate::artifact_store::lock(&config.activity_artifacts_dir)?;
-    if output.parent().is_some_and(|directory| {
-        directory
-            .join(ashe_archive_crypto::ARCHIVE_FILENAME)
-            .is_file()
-    }) {
+    // An uploaded day removed meanwhile gets no new report.
+    if !output.parent().is_some_and(Path::is_dir) {
         return Ok(());
     }
     write_atomic(&output, document.as_bytes())?;
@@ -418,6 +408,10 @@ fn load_day_reports(config: &AppConfig, day: &str) -> Result<Vec<BlockDocumentIn
     Ok(reports.into_values().collect())
 }
 
+pub(crate) fn has_pending_blocks(root: &Path, day: &str) -> bool {
+    !load_pending_ids(root, day).is_empty()
+}
+
 fn load_pending_ids(root: &Path, day: &str) -> HashSet<String> {
     let Ok(entries) = fs::read_dir(root.join("pending")) else {
         return HashSet::new();
@@ -682,7 +676,7 @@ fn now() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit {
     use super::{
         DailyCoverage, DailySource, DailyTotals, NamespaceStats, coverage_input, day_bounds,
         local_clock, namespace_totals, render_daily_report,
